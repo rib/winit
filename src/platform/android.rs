@@ -5,6 +5,8 @@ use crate::{
     window::{Window, WindowBuilder},
 };
 use ndk::configuration::Configuration;
+
+use game_activity as ndk_glue;
 use ndk_glue::Rect;
 
 /// Additional methods on `EventLoop` that are specific to Android.
