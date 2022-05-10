@@ -1,11 +1,11 @@
 #![cfg(any(target_os = "android"))]
 
 use crate::{
-    event_loop::{EventLoop, EventLoopWindowTarget},
+    event_loop::{EventLoop, EventLoopBuilder, EventLoopWindowTarget},
     window::{Window, WindowBuilder},
 };
-use ndk::configuration::Configuration;
-use ndk_glue::Rect;
+
+use android_activity::{AndroidApp, ConfigurationRef, Rect};
 
 /// Additional methods on [`EventLoop`] that are specific to Android.
 pub trait EventLoopExtAndroid {}
@@ -19,7 +19,7 @@ pub trait EventLoopWindowTargetExtAndroid {}
 pub trait WindowExtAndroid {
     fn content_rect(&self) -> Rect;
 
-    fn config(&self) -> Configuration;
+    fn config(&self) -> ConfigurationRef;
 }
 
 impl WindowExtAndroid for Window {
@@ -27,7 +27,7 @@ impl WindowExtAndroid for Window {
         self.window.content_rect()
     }
 
-    fn config(&self) -> Configuration {
+    fn config(&self) -> ConfigurationRef {
         self.window.config()
     }
 }
@@ -38,3 +38,17 @@ impl<T> EventLoopWindowTargetExtAndroid for EventLoopWindowTarget<T> {}
 pub trait WindowBuilderExtAndroid {}
 
 impl WindowBuilderExtAndroid for WindowBuilder {}
+
+pub trait EventLoopBuilderExtAndroid {
+    /// Associates the `AndroidApp` that was passed to `android_main()` with the event loop
+    ///
+    /// This must be called on Android since the `AndroidApp` is not global state.
+    fn with_android_app(&mut self, app: AndroidApp) -> &mut Self;
+}
+
+impl<T> EventLoopBuilderExtAndroid for EventLoopBuilder<T> {
+    fn with_android_app(&mut self, app: AndroidApp) -> &mut Self {
+        self.platform_specific.android_app = Some(app);
+        self
+    }
+}

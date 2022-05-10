@@ -97,7 +97,10 @@ impl<T> EventLoopBuilder<T> {
     ///   `WINIT_UNIX_BACKEND`. Legal values are `x11` and `wayland`.
     ///   If it is not set, winit will try to connect to a Wayland connection, and if that fails,
     ///   will fall back on X11. If this variable is set with any other value, winit will panic.
+    /// - **Android:** Must be configured with an `AndroidApp` from `android_main()` by calling
+    ///     [`.with_android_app(app)`] before calling `.build()`.
     ///
+    /// [`.with_android_app(app)`]: crate::platform::android::EventLoopBuilderExtAndroid::with_android_app
     /// [`platform`]: crate::platform
     #[inline]
     pub fn build(&mut self) -> EventLoop<T> {
