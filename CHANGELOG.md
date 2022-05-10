@@ -7,6 +7,17 @@ Please keep one empty line before and after all headers. (This is required for `
 And please only add new entries to the top of this list, right below the `# Unreleased` header.
 
 # Unreleased
+- **Breaking:** On Android, switched to using [`android-activity`](https://github.com/rib/android-activity) crate as a glue layer instead of [`ndk-glue](https://github.com/rust-windowing/android-ndk-rs/tree/master/ndk-glue). See [README.md#Android](https://github.com/rust-windowing/winit#Android) for more details. ([#2444](https://github.com/rust-windowing/winit/pull/2444))
+
+# 0.27.3
+
+- On Windows, added `WindowExtWindows::set_undecorated_shadow` and `WindowBuilderExtWindows::with_undecorated_shadow` to draw the drop shadow behind a borderless window.
+- On Windows, fixed default window features (ie snap, animations, shake, etc.) when decorations are disabled.
+- On Windows, fixed ALT+Space shortcut to open window menu.
+- On Wayland, fixed `Ime::Preedit` not being sent on IME reset.
+- Fixed unbound version specified for `raw-window-handle` leading to compilation failures.
+- Empty `Ime::Preedit` event will be sent before `Ime::Commit` to help clearing preedit.
+- On X11, fixed IME context picking by querying for supported styles beforehand.
 
 # 0.27.2 (2022-8-12)
 
