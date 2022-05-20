@@ -17,10 +17,12 @@ default-target = "x86_64-unknown-linux-gnu"
 targets = ["i686-pc-windows-msvc", "x86_64-pc-windows-msvc", "i686-unknown-linux-gnu", "x86_64-unknown-linux-gnu", "x86_64-apple-darwin", "wasm32-unknown-unknown"]
 
 [features]
-default = ["x11", "wayland", "wayland-dlopen"]
+default = ["x11", "wayland", "wayland-dlopen", "game-activity"]
 x11 = ["x11-dl", "mio", "percent-encoding", "parking_lot"]
 wayland = ["wayland-client", "wayland-protocols", "sctk"]
 wayland-dlopen = ["sctk/dlopen", "wayland-client/dlopen"]
+native-activity = ["dep:native-activity"]
+game-activity = ["dep:game-activity"]
 
 [dependencies]
 instant = { version = "0.1", features = ["wasm-bindgen"] }
@@ -38,9 +40,10 @@ simple_logger = "2.1.0"
 [target.'cfg(target_os = "android")'.dependencies]
 ndk = "0.6"
 ndk-sys = "0.3"
-#game-activity = { path = "../agdk-rust/game-activity" }
-game-activity = { git = "https://github.com/rib/agdk-rust" }
-#ndk-glue = "0.6"
+#native-activity = { path = "../agdk-rust/native-activity", optional = true }
+native-activity = { git = "https://github.com/rib/agdk-rust", optional = true }
+#game-activity = { path = "../agdk-rust/game-activity", optional = true }
+game-activity = { git = "https://github.com/rib/agdk-rust", optional = true }
 
 [target.'cfg(any(target_os = "ios", target_os = "macos"))'.dependencies]
 objc = "0.2.7"

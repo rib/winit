@@ -6,7 +6,11 @@ use crate::{
 };
 use ndk::configuration::Configuration;
 
+#[cfg(feature = "game-activity")]
 use game_activity as ndk_glue;
+#[cfg(feature = "native-activity")]
+use native_activity as ndk_glue;
+
 use ndk_glue::Rect;
 
 /// Additional methods on `EventLoop` that are specific to Android.

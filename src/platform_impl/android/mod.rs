@@ -1,5 +1,10 @@
 #![cfg(target_os = "android")]
 
+#[cfg(all(feature = "game-activity", feature = "native-activity"))]
+compile_error!("feature \"game-activity\" and \"native-activity\" cannot be enabled at the same time");
+#[cfg(not(any(feature = "game-activity", feature = "native-activity")))]
+compile_error!("Either feature \"game-activity\" or \"native-activity\" must be enabled on Android");
+
 use crate::{
     dpi::{PhysicalPosition, PhysicalSize, Position, Size},
     error,
@@ -12,9 +17,13 @@ use ndk::{
     native_window::NativeWindow,
 };
 
+#[cfg(feature = "game-activity")]
 use game_activity as ndk_glue;
+#[cfg(feature = "native-activity")]
+use native_activity as ndk_glue;
+
 use ndk_glue::{Rect, MainEvent, AndroidApp, AndroidAppWaker};
-use ndk_glue::input::{KeyAction, Keycode, MotionAction};
+use ndk_glue::input::{InputEvent, KeyAction, Keycode, MotionAction};
 
 use raw_window_handle::{AndroidNdkHandle, RawWindowHandle};
 use std::{
@@ -485,101 +494,108 @@ impl<T: 'static> EventLoop<T> {
         // they are double buffered and it's assumed that the application will be
         // rendering continuously.
 
-        if let Some(buffer) = self.android_app.swap_input_buffers() {
-            for motion_event in buffer.motion_events_iter() {
-                let window_id = window::WindowId(WindowId);
-                let device_id = event::DeviceId(DeviceId);
+        self.android_app.input_events(|event| {
+            match event {
+                InputEvent::MotionEvent(motion_event) => {
+                    let window_id = window::WindowId(WindowId);
+                    let device_id = event::DeviceId(DeviceId);
 
-                let phase = match motion_event.action() {
-                    MotionAction::Down | MotionAction::PointerDown => {
-                        Some(event::TouchPhase::Started)
-                    }
-                    MotionAction::Up | MotionAction::PointerUp => {
-                        Some(event::TouchPhase::Ended)
-                    }
-                    MotionAction::Move => Some(event::TouchPhase::Moved),
-                    MotionAction::Cancel => {
-                        Some(event::TouchPhase::Cancelled)
-                    }
-                    _ => {
-                        None // TODO mouse events
-                    }
-                };
-                if let Some(phase) = phase {
-                    let pointers: Box<
-                        dyn Iterator<Item = ndk_glue::input::Pointer<'_>>,
-                    > = match phase {
-                        event::TouchPhase::Started
-                        | event::TouchPhase::Ended => Box::new(
-                            std::iter::once(motion_event.pointer_at_index(
-                                motion_event.pointer_index(),
-                            )),
-                        ),
-                        event::TouchPhase::Moved
-                        | event::TouchPhase::Cancelled => {
-                            Box::new(motion_event.pointers())
+                    let phase = match motion_event.action() {
+                        MotionAction::Down | MotionAction::PointerDown => {
+                            Some(event::TouchPhase::Started)
+                        }
+                        MotionAction::Up | MotionAction::PointerUp => {
+                            Some(event::TouchPhase::Ended)
+                        }
+                        MotionAction::Move => Some(event::TouchPhase::Moved),
+                        MotionAction::Cancel => {
+                            Some(event::TouchPhase::Cancelled)
+                        }
+                        _ => {
+                            None // TODO mouse events
                         }
                     };
+                    if let Some(phase) = phase {
+                        let pointers: Box<
+                            dyn Iterator<Item = ndk_glue::input::Pointer<'_>>,
+                        > = match phase {
+                            event::TouchPhase::Started
+                            | event::TouchPhase::Ended => {
+                                Box::new(
+                                    std::iter::once(motion_event.pointer_at_index(
+                                        motion_event.pointer_index(),
+                                    ))
+                                )
+                            },
+                            event::TouchPhase::Moved
+                            | event::TouchPhase::Cancelled => {
+                                Box::new(motion_event.pointers())
+                            }
+                        };
 
-                    for pointer in pointers {
-                        let location = PhysicalPosition {
-                            x: pointer.x() as _,
-                            y: pointer.y() as _,
-                        };
-                        let event = event::Event::WindowEvent {
-                            window_id,
-                            event: event::WindowEvent::Touch(
-                                event::Touch {
-                                    device_id,
-                                    phase,
-                                    location,
-                                    id: pointer.pointer_id() as u64,
-                                    force: None,
-                                },
-                            ),
-                        };
-                        sticky_exit_callback(
-                            event,
-                            self.window_target(),
-                            control_flow,
-                            callback
-                        );
+                        for pointer in pointers {
+                            let location = PhysicalPosition {
+                                x: pointer.x() as _,
+                                y: pointer.y() as _,
+                            };
+                            trace!("Input event {device_id:?}, {phase:?}, loc={location:?}, pointer={pointer:?}");
+                            let event = event::Event::WindowEvent {
+                                window_id,
+                                event: event::WindowEvent::Touch(
+                                    event::Touch {
+                                        device_id,
+                                        phase,
+                                        location,
+                                        id: pointer.pointer_id() as u64,
+                                        force: None,
+                                    },
+                                ),
+                            };
+                            sticky_exit_callback(
+                                event,
+                                self.window_target(),
+                                control_flow,
+                                callback
+                            );
+                        }
                     }
                 }
-            }
+                InputEvent::KeyEvent(key) => {
+                    let device_id = event::DeviceId(DeviceId);
 
-            for key in buffer.key_events_iter() {
-                let device_id = event::DeviceId(DeviceId);
-
-                let state = match key.action() {
-                    KeyAction::Down => event::ElementState::Pressed,
-                    KeyAction::Up => event::ElementState::Released,
-                    _ => event::ElementState::Released,
-                };
-                #[allow(deprecated)]
-                let event = event::Event::WindowEvent {
-                    window_id: window::WindowId(WindowId),
-                    event: event::WindowEvent::KeyboardInput {
-                        device_id,
-                        input: event::KeyboardInput {
-                            scancode: key.scan_code() as u32,
-                            state,
-                            virtual_keycode: ndk_keycode_to_virtualkeycode(
-                                key.key_code(),
-                            ),
-                            modifiers: event::ModifiersState::default(),
+                    let state = match key.action() {
+                        KeyAction::Down => event::ElementState::Pressed,
+                        KeyAction::Up => event::ElementState::Released,
+                        _ => event::ElementState::Released,
+                    };
+                    #[allow(deprecated)]
+                    let event = event::Event::WindowEvent {
+                        window_id: window::WindowId(WindowId),
+                        event: event::WindowEvent::KeyboardInput {
+                            device_id,
+                            input: event::KeyboardInput {
+                                scancode: key.scan_code() as u32,
+                                state,
+                                virtual_keycode: ndk_keycode_to_virtualkeycode(
+                                    key.key_code(),
+                                ),
+                                modifiers: event::ModifiersState::default(),
+                            },
+                            is_synthetic: false,
                         },
-                        is_synthetic: false,
-                    },
-                };
-                sticky_exit_callback(
-                    event,
-                    self.window_target(),
-                    control_flow,
-                    callback
-                );
+                    };
+                    sticky_exit_callback(
+                        event,
+                        self.window_target(),
+                        control_flow,
+                        callback
+                    );
+                }
+                _ => {
+                    warn!("Unsupported input event {event:?}");
+                },
             }
-        }
+        });
 
 
         // Empty the user event buffer
