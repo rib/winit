@@ -393,6 +393,9 @@ impl<T> EventLoopRunner<T> {
             }
         };
         self.call_event_handler(Event::NewEvents(start_cause));
+        if init {
+            self.call_event_handler(Event::Resumed);
+        }
         self.dispatch_buffered_events();
         RedrawWindow(self.thread_msg_target, ptr::null(), 0, RDW_INTERNALPAINT);
     }
