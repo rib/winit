@@ -584,6 +584,20 @@ impl<T: 'static> EventLoop<T> {
                         control_flow,
                         callback
                     );
+                    if key.action() == KeyAction::Down {
+                        if let Some(character) = key.char() {
+                            let event = event::Event::WindowEvent {
+                                window_id: window::WindowId(WindowId),
+                                event: event::WindowEvent::ReceivedCharacter(character),
+                            };
+                            sticky_exit_callback(
+                                event,
+                                self.window_target(),
+                                control_flow,
+                                callback
+                            );
+                        }
+                    }
                 }
                 _ => {
                     warn!("Unknown android_activity input event {event:?}")
