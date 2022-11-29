@@ -653,6 +653,16 @@ impl Window {
     }
 
     #[inline]
+    pub fn begin_ime_input(&self) {
+        // NOP
+    }
+
+    #[inline]
+    pub fn end_ime_input(&self) {
+        // NOP
+    }
+
+    #[inline]
     pub fn request_user_attention(&self, request_type: Option<UserAttentionType>) {
         let window = self.window.clone();
         let active_window_handle = unsafe { GetActiveWindow() };

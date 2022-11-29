@@ -852,6 +852,27 @@ impl Window {
         self.window.set_ime_allowed(allowed);
     }
 
+    // TODO: support some kind of config + builder API for e.g. specifying
+    // what kind of input is expected (e.g. request a number pad, or email input)
+    // E.g. android supports these types:
+    // - TYPE_CLASS_NUMBER - A text field for entering numbers. As illustrated in the previous screen shot, the Latin IME displays a number pad for fields of this type.
+    // - TYPE_CLASS_DATETIME - A text field for entering a date and time.
+    // - TYPE_CLASS_PHONE - A text field for entering telephone numbers.
+    // - TYPE_CLASS_TEXT - A text field for entering all supported characters.
+    // Also allow variations like
+    // - TYPE_TEXT_VARIATION_PASSWORD - A variant of TYPE_CLASS_TEXT for entering passwords. The input method will display dingbats instead of the actual text.
+    // - TYPE_TEXT_VARIATION_URI - A variant of TYPE_CLASS_TEXT for entering web URLs and other Uniform Resource Identifiers (URIs).
+    // - TYPE_TEXT_FLAG_AUTO_COMPLETE - A variant of TYPE_CLASS_TEXT for entering text that the application "auto-completes" from a dictionary, search, or other facility.
+    #[inline]
+    pub fn begin_ime_input(&self) {
+        self.window.begin_ime_input();
+    }
+
+    #[inline]
+    pub fn end_ime_input(&self) {
+        self.window.end_ime_input();
+    }
+
     /// Brings the window to the front and sets input focus. Has no effect if the window is
     /// already in focus, minimized, or not visible.
     ///

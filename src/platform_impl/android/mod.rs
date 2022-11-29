@@ -583,6 +583,24 @@ impl<T: 'static> EventLoop<T> {
                         callback
                     );
                 }
+                InputEvent::TextEvent(ime_state) => {
+                    let compose_region = match (ime_state.compose_region.start, ime_state.compose_region.end) {
+                        (Some(start), Some(end)) => Some((start, end)),
+                        (_, _) => None
+                    };
+                    let event = event::Event::WindowEvent {
+                        window_id: window::WindowId(WindowId),
+                        event: event::WindowEvent::Ime(
+                            event::Ime::Preedit(ime_state.text.clone(), compose_region)
+                        )
+                    };
+                    sticky_exit_callback(
+                        event,
+                        self.window_target(),
+                        control_flow,
+                        callback
+                    );
+                }
                 _ => {
                     warn!("Unknown android_activity input event {event:?}")
                 }
@@ -996,7 +1014,17 @@ impl Window {
 
     pub fn set_ime_position(&self, _position: Position) {}
 
-    pub fn set_ime_allowed(&self, _allowed: bool) {}
+    pub fn set_ime_allowed(&self, allowed: bool) {
+        // NOP
+    }
+
+    pub fn begin_ime_input(&self) {
+        self.app.show_soft_input(false);
+    }
+
+    pub fn end_ime_input(&self) {
+        self.app.hide_soft_input(false);
+    }
 
     pub fn focus_window(&self) {}
 
