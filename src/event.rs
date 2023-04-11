@@ -329,6 +329,14 @@ pub enum StartCause {
     Init,
 }
 
+/// The return status for `pump_events`
+pub enum PumpStatus {
+    /// Continue running external loop
+    Continue,
+    /// exit external loop
+    Exit(i32),
+}
+
 /// Describes an event from a [`Window`].
 #[derive(Debug, PartialEq)]
 pub enum WindowEvent<'a> {
