@@ -7,7 +7,7 @@ use winit::{
     window::{Theme, WindowBuilder},
 };
 
-fn main() {
+fn main() -> std::result::Result<(), impl std::error::Error> {
     SimpleLogger::new().init().unwrap();
     let event_loop = EventLoop::new();
 
@@ -67,5 +67,5 @@ fn main() {
             },
             _ => (),
         }
-    });
+    })
 }

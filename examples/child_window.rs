@@ -1,5 +1,5 @@
 #[cfg(any(x11_platform, macos_platform, windows_platform))]
-fn main() {
+fn main() -> std::result::Result<(), impl std::error::Error> {
     use std::collections::HashMap;
 
     use raw_window_handle::HasRawWindowHandle;

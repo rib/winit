@@ -11,7 +11,7 @@ use winit::{
 
 const BORDER: f64 = 8.0;
 
-fn main() {
+fn main() -> std::result::Result<(), impl std::error::Error> {
     SimpleLogger::new().init().unwrap();
     let event_loop = EventLoop::new();
 
@@ -67,7 +67,7 @@ fn main() {
             _ => (),
         },
         _ => (),
-    });
+    })
 }
 
 fn cursor_direction_icon(resize_direction: Option<ResizeDirection>) -> CursorIcon {

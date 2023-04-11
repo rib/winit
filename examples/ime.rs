@@ -9,7 +9,7 @@ use winit::{
     window::{ImePurpose, WindowBuilder},
 };
 
-fn main() {
+fn main() -> std::result::Result<(), impl std::error::Error> {
     SimpleLogger::new()
         .with_level(LevelFilter::Trace)
         .init()
@@ -108,5 +108,5 @@ fn main() {
             }
             _ => (),
         }
-    });
+    })
 }

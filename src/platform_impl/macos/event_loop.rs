@@ -6,7 +6,7 @@ use std::{
     mem,
     os::raw::c_void,
     panic::{catch_unwind, resume_unwind, RefUnwindSafe, UnwindSafe},
-    process, ptr,
+    ptr,
     rc::{Rc, Weak},
     sync::mpsc,
 };
@@ -23,7 +23,8 @@ use raw_window_handle::{AppKitDisplayHandle, RawDisplayHandle};
 
 use super::appkit::{NSApp, NSApplicationActivationPolicy, NSEvent};
 use crate::{
-    event::Event,
+    error::ExternalError,
+    event::{Event, PumpStatus},
     event_loop::{ControlFlow, EventLoopClosed, EventLoopWindowTarget as RootWindowTarget},
     platform::macos::ActivationPolicy,
     platform_impl::platform::{
@@ -183,18 +184,25 @@ impl<T> EventLoop<T> {
         &self.window_target
     }
 
-    pub fn run<F>(mut self, callback: F) -> !
+    pub fn run<F>(mut self, callback: F) -> Result<(), ExternalError>
     where
         F: 'static + FnMut(Event<'_, T>, &RootWindowTarget<T>, &mut ControlFlow),
     {
-        let exit_code = self.run_return(callback);
-        process::exit(exit_code);
+        self.run_ondemand(callback)
     }
 
-    pub fn run_return<F>(&mut self, callback: F) -> i32
+    // NB: we don't base this on `pump_events` because for `MacOs` we can't support
+    // `pump_events` elegantly (we just ask to run the loop for a "short" amount of
+    // time and so a layered implementation would end up using a lot of CPU due to
+    // redundant wake ups.
+    pub fn run_ondemand<F>(&mut self, callback: F) -> Result<(), ExternalError>
     where
         F: FnMut(Event<'_, T>, &RootWindowTarget<T>, &mut ControlFlow),
     {
+        if AppState::is_running() {
+            return Err(ExternalError::AlreadyRunning);
+        }
+
         // This transmute is always safe, in case it was reached through `run`, since our
         // lifetime will be already 'static. In other cases caller should ensure that all data
         // they passed to callback will actually outlive it, some apps just can't move
@@ -217,17 +225,98 @@ impl<T> EventLoop<T> {
             drop(callback);
 
             AppState::set_callback(weak_cb, Rc::clone(&self.window_target));
+
+            if AppState::is_launched() {
+                debug_assert!(!AppState::is_running());
+                AppState::start_running(); // Set is_running = true + dispatch `NewEvents(Init)` + `Resumed`
+            }
+            AppState::set_stop_app_before_wait(false);
             unsafe { app.run() };
 
             if let Some(panic) = self.panic_info.take() {
                 drop(self._callback.take());
+                AppState::clear_callback();
                 resume_unwind(panic);
             }
             AppState::exit()
         });
         drop(self._callback.take());
 
-        exit_code
+        if exit_code == 0 {
+            Ok(())
+        } else {
+            Err(ExternalError::ExitFailure(exit_code))
+        }
+    }
+
+    pub fn pump_events<F>(&mut self, callback: F) -> PumpStatus
+    where
+        F: FnMut(Event<'_, T>, &RootWindowTarget<T>, &mut ControlFlow),
+    {
+        // This transmute is always safe, in case it was reached through `run`, since our
+        // lifetime will be already 'static. In other cases caller should ensure that all data
+        // they passed to callback will actually outlive it, some apps just can't move
+        // everything to event loop, so this is something that they should care about.
+        let callback = unsafe {
+            mem::transmute::<
+                Rc<RefCell<dyn FnMut(Event<'_, T>, &RootWindowTarget<T>, &mut ControlFlow)>>,
+                Rc<RefCell<dyn FnMut(Event<'_, T>, &RootWindowTarget<T>, &mut ControlFlow)>>,
+            >(Rc::new(RefCell::new(callback)))
+        };
+
+        self._callback = Some(Rc::clone(&callback));
+
+        autoreleasepool(|_| {
+            let app = NSApp();
+
+            // A bit of juggling with the callback references to make sure
+            // that `self.callback` is the only owner of the callback.
+            let weak_cb: Weak<_> = Rc::downgrade(&callback);
+            drop(callback);
+
+            AppState::set_callback(weak_cb, Rc::clone(&self.window_target));
+
+            // Note: there are two possible `Init` conditions we have to handle - either the
+            // `NSApp` is not yet launched, or else the `EventLoop` is not yet running.
+
+            // As a special case, if the `NSApp` hasn't been launched yet then we at least run
+            // the loop until it has fully launched.
+            if !AppState::is_launched() {
+                debug_assert!(!AppState::is_running());
+
+                AppState::request_stop_on_launch();
+                unsafe {
+                    app.run();
+                }
+
+                // Note: we dispatch `NewEvents(Init)` + `Resumed` events after the `NSApp` has launched
+            } else if !AppState::is_running() {
+                AppState::start_running(); // Set is_running = true + dispatch `NewEvents(Init)` + `Resumed`
+            } else {
+                AppState::set_stop_app_before_wait(true);
+                unsafe {
+                    app.run();
+                }
+            }
+
+            if let Some(panic) = self.panic_info.take() {
+                drop(self._callback.take());
+                AppState::clear_callback();
+                resume_unwind(panic);
+            }
+        });
+
+        let status = if let ControlFlow::ExitWithCode(code) = AppState::control_flow() {
+            AppState::exit();
+            PumpStatus::Exit(code)
+        } else {
+            PumpStatus::Continue
+        };
+
+        AppState::clear_callback();
+        drop(self._callback.take());
+
+        status
     }
 
     pub fn create_proxy(&self) -> EventLoopProxy<T> {
@@ -245,6 +334,8 @@ pub fn stop_app_on_panic<F: FnOnce() -> R + UnwindSafe, R>(
     match catch_unwind(f) {
         Ok(r) => Some(r),
         Err(e) => {
+            log::error!("Stopping NSApp due to a panic!: {:?}", panic_info);
+
             // It's important that we set the panic before requesting a `stop`
             // because some callback are still called during the `stop` message
             // and we need to know in those callbacks if the application is currently

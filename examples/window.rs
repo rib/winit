@@ -7,7 +7,7 @@ use winit::{
     window::WindowBuilder,
 };
 
-fn main() {
+fn main() -> Result<(), impl std::error::Error> {
     SimpleLogger::new().init().unwrap();
     let event_loop = EventLoop::new();
 
@@ -25,11 +25,14 @@ fn main() {
             Event::WindowEvent {
                 event: WindowEvent::CloseRequested,
                 window_id,
-            } if window_id == window.id() => control_flow.set_exit(),
+            } if window_id == window.id() => {
+                log::warn!("Close button pressed");
+                control_flow.set_exit()
+            }
             Event::MainEventsCleared => {
                 window.request_redraw();
             }
             _ => (),
         }
-    });
+    })
 }

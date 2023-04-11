@@ -1,7 +1,7 @@
 #![allow(clippy::single_match)]
 
 #[cfg(not(wasm_platform))]
-fn main() {
+fn main() -> std::result::Result<(), impl std::error::Error> {
     use simple_logger::SimpleLogger;
     use winit::{
         event::{Event, WindowEvent},
@@ -46,7 +46,7 @@ fn main() {
             } => control_flow.set_exit(),
             _ => (),
         }
-    });
+    })
 }
 
 #[cfg(wasm_platform)]

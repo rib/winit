@@ -7,32 +7,27 @@
     x11_platform,
     wayland_platform,
     android_platform,
-    orbital_platform,
 ))]
-fn main() {
-    use std::{thread::sleep, time::Duration};
+fn main() -> std::process::ExitCode {
+    use std::{process::ExitCode, thread::sleep, time::Duration};
 
     use simple_logger::SimpleLogger;
     use winit::{
-        event::{Event, WindowEvent},
+        event::{Event, PumpStatus, WindowEvent},
         event_loop::EventLoop,
-        platform::run_return::EventLoopExtRunReturn,
+        platform::pump_events::EventLoopExtPumpEvents,
         window::WindowBuilder,
     };
     let mut event_loop = EventLoop::new();
 
     SimpleLogger::new().init().unwrap();
-    let _window = WindowBuilder::new()
+    let window = WindowBuilder::new()
         .with_title("A fantastic window!")
         .build(&event_loop)
         .unwrap();
 
-    let mut quit = false;
-
-    while !quit {
-        event_loop.run_return(|event, _, control_flow| {
-            control_flow.set_wait();
-
+    'main: loop {
+        let status = event_loop.pump_events(|event, _, control_flow| {
             if let Event::WindowEvent { event, .. } = &event {
                 // Print only Window events to reduce noise
                 println!("{event:?}");
@@ -41,16 +36,17 @@ fn main() {
             match event {
                 Event::WindowEvent {
                     event: WindowEvent::CloseRequested,
-                    ..
-                } => {
-                    quit = true;
-                }
+                    window_id,
+                } if window_id == window.id() => control_flow.set_exit(),
                 Event::MainEventsCleared => {
-                    control_flow.set_exit();
+                    window.request_redraw();
                 }
                 _ => (),
             }
         });
+        if let PumpStatus::Exit(exit_code) = status {
+            break 'main ExitCode::from(exit_code as u8);
+        }
 
         // Sleep for 1/60 second to simulate rendering
         println!("rendering");
@@ -60,5 +56,5 @@ fn main() {
 
 #[cfg(any(ios_platform, wasm_platform))]
 fn main() {
-    println!("This platform doesn't support run_return.");
+    println!("This platform doesn't support pump_events.");
 }

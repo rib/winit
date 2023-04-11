@@ -9,7 +9,7 @@ use winit::{
     window::{Window, WindowBuilder, WindowId},
 };
 
-fn main() {
+fn main() -> std::result::Result<(), impl std::error::Error> {
     SimpleLogger::new().init().unwrap();
     let event_loop = EventLoop::new();
 
@@ -60,7 +60,7 @@ fn main() {
             _ => (),
         },
         _ => (),
-    });
+    })
 }
 
 fn name_windows(window_id: WindowId, switched: bool, window_1: &Window, window_2: &Window) {

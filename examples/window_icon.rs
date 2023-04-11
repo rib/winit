@@ -9,7 +9,7 @@ use winit::{
     window::{Icon, WindowBuilder},
 };
 
-fn main() {
+fn main() -> std::result::Result<(), impl std::error::Error> {
     SimpleLogger::new().init().unwrap();
 
     // You'll have to choose an icon size at your own discretion. On X11, the desired size varies
@@ -43,7 +43,7 @@ fn main() {
                 _ => (),
             }
         }
-    });
+    })
 }
 
 fn load_icon(path: &Path) -> Icon {

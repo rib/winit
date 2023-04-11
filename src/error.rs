@@ -9,6 +9,10 @@ pub enum ExternalError {
     NotSupported(NotSupportedError),
     /// The OS cannot perform the operation.
     Os(OsError),
+    /// The event loop can't be re-run while it's already running
+    AlreadyRunning,
+    /// Application has exit with an error status.
+    ExitFailure(i32),
 }
 
 /// The error type for when the requested operation is not supported by the backend.
@@ -59,8 +63,10 @@ impl fmt::Display for OsError {
 impl fmt::Display for ExternalError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
         match self {
+            ExternalError::AlreadyRunning => write!(f, "EventLoop is already running"),
             ExternalError::NotSupported(e) => e.fmt(f),
             ExternalError::Os(e) => e.fmt(f),
+            ExternalError::ExitFailure(status) => write!(f, "Exit Failure: {status}"),
         }
     }
 }

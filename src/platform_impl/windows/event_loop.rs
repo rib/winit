@@ -7,14 +7,16 @@ use std::{
     collections::VecDeque,
     ffi::c_void,
     marker::PhantomData,
-    mem, panic, ptr,
+    mem,
+    panic,
+    ptr,
     rc::Rc,
     sync::{
         atomic::{AtomicU32, Ordering},
         mpsc::{self, Receiver, Sender},
         Arc, Mutex, MutexGuard,
     },
-    thread,
+    //thread,
     time::{Duration, Instant},
 };
 
@@ -23,13 +25,11 @@ use raw_window_handle::{RawDisplayHandle, WindowsDisplayHandle};
 
 use windows_sys::Win32::{
     Devices::HumanInterfaceDevice::MOUSE_MOVE_RELATIVE,
-    Foundation::{BOOL, HANDLE, HWND, LPARAM, LRESULT, POINT, RECT, WAIT_TIMEOUT, WPARAM},
+    Foundation::{BOOL, HANDLE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
     Graphics::Gdi::{
-        GetMonitorInfoW, GetUpdateRect, MonitorFromRect, MonitorFromWindow, RedrawWindow,
-        ScreenToClient, ValidateRect, MONITORINFO, MONITOR_DEFAULTTONULL, RDW_INTERNALPAINT,
-        SC_SCREENSAVE,
+        GetMonitorInfoW, MonitorFromRect, MonitorFromWindow, RedrawWindow, ScreenToClient,
+        ValidateRect, MONITORINFO, MONITOR_DEFAULTTONULL, RDW_INTERNALPAINT, SC_SCREENSAVE,
     },
-    Media::{timeBeginPeriod, timeEndPeriod, timeGetDevCaps, TIMECAPS, TIMERR_NOERROR},
     System::{Ole::RevokeDragDrop, Threading::GetCurrentThreadId, WindowsProgramming::INFINITE},
     UI::{
         Controls::{HOVER_DEFAULT, WM_MOUSELEAVE},
@@ -51,14 +51,13 @@ use windows_sys::Win32::{
         },
         WindowsAndMessaging::{
             CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetCursorPos,
-            GetMenu, GetMessageW, LoadCursorW, MsgWaitForMultipleObjectsEx, PeekMessageW,
-            PostMessageW, PostThreadMessageW, RegisterClassExW, RegisterWindowMessageA, SetCursor,
-            SetWindowPos, TranslateMessage, CREATESTRUCTW, GIDC_ARRIVAL, GIDC_REMOVAL, GWL_STYLE,
-            GWL_USERDATA, HTCAPTION, HTCLIENT, MINMAXINFO, MNC_CLOSE, MSG, MWMO_INPUTAVAILABLE,
-            NCCALCSIZE_PARAMS, PM_NOREMOVE, PM_QS_PAINT, PM_REMOVE, PT_PEN, PT_TOUCH, QS_ALLEVENTS,
-            RI_KEY_E0, RI_KEY_E1, RI_MOUSE_WHEEL, SC_MINIMIZE, SC_RESTORE, SIZE_MAXIMIZED,
-            SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WHEEL_DELTA, WINDOWPOS,
-            WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_CREATE, WM_DESTROY, WM_DPICHANGED,
+            GetMenu, GetMessageW, KillTimer, LoadCursorW, PeekMessageW, PostMessageW,
+            RegisterClassExW, RegisterWindowMessageA, SetCursor, SetTimer, SetWindowPos,
+            TranslateMessage, CREATESTRUCTW, GIDC_ARRIVAL, GIDC_REMOVAL, GWL_STYLE, GWL_USERDATA,
+            HTCAPTION, HTCLIENT, MINMAXINFO, MNC_CLOSE, NCCALCSIZE_PARAMS, PM_REMOVE, PT_PEN,
+            PT_TOUCH, RI_KEY_E0, RI_KEY_E1, RI_MOUSE_WHEEL, SC_MINIMIZE, SC_RESTORE,
+            SIZE_MAXIMIZED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WHEEL_DELTA,
+            WINDOWPOS, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_CREATE, WM_DESTROY, WM_DPICHANGED,
             WM_DROPFILES, WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE, WM_GETMINMAXINFO, WM_IME_COMPOSITION,
             WM_IME_ENDCOMPOSITION, WM_IME_SETCONTEXT, WM_IME_STARTCOMPOSITION, WM_INPUT,
             WM_INPUT_DEVICE_CHANGE, WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS, WM_LBUTTONDOWN,
@@ -76,7 +75,10 @@ use windows_sys::Win32::{
 
 use crate::{
     dpi::{PhysicalPosition, PhysicalSize},
-    event::{DeviceEvent, Event, Force, Ime, KeyboardInput, Touch, TouchPhase, WindowEvent},
+    error::ExternalError,
+    event::{
+        DeviceEvent, Event, Force, Ime, KeyboardInput, PumpStatus, Touch, TouchPhase, WindowEvent,
+    },
     event_loop::{
         ControlFlow, DeviceEventFilter, EventLoopClosed, EventLoopWindowTarget as RootELW,
     },
@@ -95,6 +97,8 @@ use crate::{
     window::WindowId as RootWindowId,
 };
 use runner::{EventLoopRunner, EventLoopRunnerShared};
+
+use self::runner::RunnerState;
 
 use super::window::set_skip_taskbar;
 
@@ -205,13 +209,7 @@ impl<T: 'static> EventLoop<T> {
 
         let thread_msg_target = create_event_target_window::<T>();
 
-        thread::Builder::new()
-            .name("winit wait thread".to_string())
-            .spawn(move || wait_thread(thread_id, thread_msg_target))
-            .expect("Failed to spawn winit wait thread");
-        let wait_thread_id = get_wait_thread_id();
-
-        let runner_shared = Rc::new(EventLoopRunner::new(thread_msg_target, wait_thread_id));
+        let runner_shared = Rc::new(EventLoopRunner::new(thread_msg_target));
 
         let thread_msg_sender =
             insert_event_target_window_data::<T>(thread_msg_target, runner_shared.clone());
@@ -238,69 +236,200 @@ impl<T: 'static> EventLoop<T> {
         &self.window_target
     }
 
-    pub fn run<F>(mut self, event_handler: F) -> !
+    pub fn run<F>(mut self, event_handler: F) -> Result<(), ExternalError>
     where
         F: 'static + FnMut(Event<'_, T>, &RootELW<T>, &mut ControlFlow),
     {
-        let exit_code = self.run_return(event_handler);
-        ::std::process::exit(exit_code);
+        self.run_ondemand(event_handler)
     }
 
-    pub fn run_return<F>(&mut self, mut event_handler: F) -> i32
+    pub fn run_ondemand<F>(&mut self, mut event_handler: F) -> Result<(), ExternalError>
     where
         F: FnMut(Event<'_, T>, &RootELW<T>, &mut ControlFlow),
     {
-        let event_loop_windows_ref = &self.window_target;
+        {
+            let runner = &self.window_target.p.runner_shared;
+            if runner.state() != RunnerState::Uninitialized {
+                return Err(ExternalError::AlreadyRunning);
+            }
 
-        unsafe {
-            self.window_target
-                .p
-                .runner_shared
-                .set_event_handler(move |event, control_flow| {
+            let event_loop_windows_ref = &self.window_target;
+            unsafe {
+                runner.set_event_handler(move |event, control_flow| {
                     event_handler(event, event_loop_windows_ref, control_flow)
                 });
+            }
         }
 
-        let runner = &self.window_target.p.runner_shared;
-
         let exit_code = unsafe {
-            let mut msg = mem::zeroed();
-
-            runner.poll();
             'main: loop {
-                if GetMessageW(&mut msg, 0, 0, 0) == false.into() {
-                    break 'main 0;
+                if let ControlFlow::ExitWithCode(code) = self.wait_and_dispatch_message() {
+                    break 'main code;
                 }
 
-                let handled = if let Some(callback) = self.msg_hook.as_deref_mut() {
-                    callback(&mut msg as *mut _ as *mut _)
-                } else {
-                    false
-                };
-                if !handled {
-                    TranslateMessage(&msg);
-                    DispatchMessageW(&msg);
-                }
-
-                if let Err(payload) = runner.take_panic_error() {
-                    runner.reset_runner();
-                    panic::resume_unwind(payload);
-                }
-
-                if let ControlFlow::ExitWithCode(code) = runner.control_flow() {
-                    if !runner.handling_events() {
-                        break 'main code;
-                    }
+                if let ControlFlow::ExitWithCode(code) = self.dispatch_peeked_messages() {
+                    break 'main code;
                 }
             }
         };
 
+        let runner = &self.window_target.p.runner_shared;
         unsafe {
             runner.loop_destroyed();
         }
 
         runner.reset_runner();
-        exit_code
+
+        if exit_code == 0 {
+            Ok(())
+        } else {
+            Err(ExternalError::ExitFailure(exit_code))
+        }
+    }
+
+    pub fn pump_events<F>(&mut self, mut event_handler: F) -> PumpStatus
+    where
+        F: FnMut(Event<'_, T>, &RootELW<T>, &mut ControlFlow),
+    {
+        {
+            let runner = &self.window_target.p.runner_shared;
+            let event_loop_windows_ref = &self.window_target;
+            unsafe {
+                runner.set_event_handler(move |event, control_flow| {
+                    event_handler(event, event_loop_windows_ref, control_flow)
+                });
+                runner.wakeup();
+            }
+        }
+
+        unsafe {
+            self.dispatch_peeked_messages();
+        };
+
+        let runner = &self.window_target.p.runner_shared;
+
+        let status = if let ControlFlow::ExitWithCode(code) = runner.control_flow() {
+            unsafe {
+                runner.loop_destroyed();
+
+                // Immediately reset the internal state for the loop to allow
+                // the loop to be run more than once.
+                runner.reset_runner();
+            }
+            PumpStatus::Exit(code)
+        } else {
+            unsafe {
+                runner.prepare_wait();
+            }
+            PumpStatus::Continue
+        };
+
+        // Need to wait until we've checked for an exit status, in case we need to dispatch
+        // a LoopDestroyed event
+        runner.clear_event_handler();
+
+        status
+    }
+
+    /// Wait for one message and dispatch it, optionally with a timeout if control_flow is `WaitUntil`
+    unsafe fn wait_and_dispatch_message(&mut self) -> ControlFlow {
+        let mut msg = mem::zeroed();
+
+        let runner = &self.window_target.p.runner_shared;
+
+        // We aim to be consistent with the MacOS backend which has a RunLoop
+        // observer that will dispatch MainEventsCleared when about to wait for
+        // events, and NewEvents after the RunLoop wakes up.
+        //
+        // We emulate similar behaviour by treating `GetMessage` as our wait
+        // point and wake up point (when it returns) and we drain all other
+        // pending messages via `PeekMessage` until we come back to "wait" via
+        // `GetMessage`
+        //
+        runner.prepare_wait();
+
+        let start = Instant::now();
+
+        let timeout = match runner.control_flow() {
+            ControlFlow::Wait => None,
+            ControlFlow::Poll => Some(Duration::from_millis(0)),
+            ControlFlow::WaitUntil(wait_deadline) => {
+                if wait_deadline > start {
+                    Some(wait_deadline - start)
+                } else {
+                    Some(Duration::from_millis(0))
+                }
+            }
+            ControlFlow::ExitWithCode(_code) => unreachable!(),
+        };
+        if let Some(timeout) = timeout {
+            // XXX: how should we pick a timer ID?
+            SetTimer(0, 0xf00, dur2timeout(timeout), None);
+        } else {
+            KillTimer(0, 0xf00);
+        }
+
+        if GetMessageW(&mut msg, 0, 0, 0) == false.into() {
+            // A return value of 0 implies `WM_QUIT`
+            runner.set_exit_control_flow();
+            return runner.control_flow();
+        }
+
+        runner.wakeup();
+
+        let handled = if let Some(callback) = self.msg_hook.as_deref_mut() {
+            callback(&mut msg as *mut _ as *mut _)
+        } else {
+            false
+        };
+        if !handled {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+
+        if let Err(payload) = runner.take_panic_error() {
+            runner.reset_runner();
+            panic::resume_unwind(payload);
+        }
+
+        runner.control_flow()
+    }
+
+    /// Dispatch all queued messages via `PeekMessageW`
+    unsafe fn dispatch_peeked_messages(&mut self) -> ControlFlow {
+        let runner = &self.window_target.p.runner_shared;
+
+        let mut msg = mem::zeroed();
+
+        let mut control_flow = runner.control_flow();
+
+        loop {
+            if PeekMessageW(&mut msg, 0, 0, 0, PM_REMOVE) == false.into() {
+                break;
+            }
+
+            let handled = if let Some(callback) = self.msg_hook.as_deref_mut() {
+                callback(&mut msg as *mut _ as *mut _)
+            } else {
+                false
+            };
+            if !handled {
+                TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+
+            if let Err(payload) = runner.take_panic_error() {
+                runner.reset_runner();
+                panic::resume_unwind(payload);
+            }
+
+            control_flow = runner.control_flow();
+            if let ControlFlow::ExitWithCode(_code) = control_flow {
+                break;
+            }
+        }
+
+        control_flow
     }
 
     pub fn create_proxy(&self) -> EventLoopProxy<T> {
@@ -378,109 +507,6 @@ fn main_thread_id() -> u32 {
     };
 
     unsafe { MAIN_THREAD_ID }
-}
-
-fn get_wait_thread_id() -> u32 {
-    unsafe {
-        let mut msg = mem::zeroed();
-        let result = GetMessageW(
-            &mut msg,
-            -1,
-            SEND_WAIT_THREAD_ID_MSG_ID.get(),
-            SEND_WAIT_THREAD_ID_MSG_ID.get(),
-        );
-        assert_eq!(
-            msg.message,
-            SEND_WAIT_THREAD_ID_MSG_ID.get(),
-            "this shouldn't be possible. please open an issue with Winit. error code: {result}"
-        );
-        msg.lParam as u32
-    }
-}
-
-static WAIT_PERIOD_MIN: Lazy<Option<u32>> = Lazy::new(|| unsafe {
-    let mut caps = TIMECAPS {
-        wPeriodMin: 0,
-        wPeriodMax: 0,
-    };
-    if timeGetDevCaps(&mut caps, mem::size_of::<TIMECAPS>() as u32) == TIMERR_NOERROR {
-        Some(caps.wPeriodMin)
-    } else {
-        None
-    }
-});
-
-fn wait_thread(parent_thread_id: u32, msg_window_id: HWND) {
-    unsafe {
-        let mut msg: MSG;
-
-        let cur_thread_id = GetCurrentThreadId();
-        PostThreadMessageW(
-            parent_thread_id,
-            SEND_WAIT_THREAD_ID_MSG_ID.get(),
-            0,
-            cur_thread_id as LPARAM,
-        );
-
-        let mut wait_until_opt = None;
-        'main: loop {
-            // Zeroing out the message ensures that the `WaitUntilInstantBox` doesn't get
-            // double-freed if `MsgWaitForMultipleObjectsEx` returns early and there aren't
-            // additional messages to process.
-            msg = mem::zeroed();
-
-            if wait_until_opt.is_some() {
-                if PeekMessageW(&mut msg, 0, 0, 0, PM_REMOVE) != false.into() {
-                    TranslateMessage(&msg);
-                    DispatchMessageW(&msg);
-                }
-            } else if GetMessageW(&mut msg, 0, 0, 0) == false.into() {
-                break 'main;
-            } else {
-                TranslateMessage(&msg);
-                DispatchMessageW(&msg);
-            }
-
-            if msg.message == WAIT_UNTIL_MSG_ID.get() {
-                wait_until_opt = Some(*WaitUntilInstantBox::from_raw(msg.lParam as *mut _));
-            } else if msg.message == CANCEL_WAIT_UNTIL_MSG_ID.get() {
-                wait_until_opt = None;
-            }
-
-            if let Some(wait_until) = wait_until_opt {
-                let now = Instant::now();
-                if now < wait_until {
-                    // Windows' scheduler has a default accuracy of several ms. This isn't good enough for
-                    // `WaitUntil`, so we request the Windows scheduler to use a higher accuracy if possible.
-                    // If we couldn't query the timer capabilities, then we use the default resolution.
-                    if let Some(period) = *WAIT_PERIOD_MIN {
-                        timeBeginPeriod(period);
-                    }
-                    // `MsgWaitForMultipleObjects` is bound by the granularity of the scheduler period.
-                    // Because of this, we try to reduce the requested time just enough to undershoot `wait_until`
-                    // by the smallest amount possible, and then we busy loop for the remaining time inside the
-                    // NewEvents message handler.
-                    let resume_reason = MsgWaitForMultipleObjectsEx(
-                        0,
-                        ptr::null(),
-                        dur2timeout(wait_until - now).saturating_sub(WAIT_PERIOD_MIN.unwrap_or(1)),
-                        QS_ALLEVENTS,
-                        MWMO_INPUTAVAILABLE,
-                    );
-                    if let Some(period) = *WAIT_PERIOD_MIN {
-                        timeEndPeriod(period);
-                    }
-                    if resume_reason == WAIT_TIMEOUT {
-                        PostMessageW(msg_window_id, PROCESS_NEW_EVENTS_MSG_ID.get(), 0, 0);
-                        wait_until_opt = None;
-                    }
-                } else {
-                    PostMessageW(msg_window_id, PROCESS_NEW_EVENTS_MSG_ID.get(), 0, 0);
-                    wait_until_opt = None;
-                }
-            }
-        }
-    }
 }
 
 // Implementation taken from https://github.com/rust-lang/rust/blob/db5476571d9b27c862b95c1e64764b0ac8980e23/src/libstd/sys/windows/mod.rs
@@ -601,8 +627,6 @@ impl<T: 'static> EventLoopProxy<T> {
     }
 }
 
-type WaitUntilInstantBox = Box<Instant>;
-
 /// A lazily-initialized window message ID.
 pub struct LazyMessageId {
     /// The ID.
@@ -662,13 +686,6 @@ static USER_EVENT_MSG_ID: LazyMessageId = LazyMessageId::new("Winit::WakeupMsg\0
 // WPARAM contains a Box<Box<dyn FnMut()>> that must be retrieved with `Box::from_raw`,
 // and LPARAM is unused.
 static EXEC_MSG_ID: LazyMessageId = LazyMessageId::new("Winit::ExecMsg\0");
-static PROCESS_NEW_EVENTS_MSG_ID: LazyMessageId = LazyMessageId::new("Winit::ProcessNewEvents\0");
-/// lparam is the wait thread's message id.
-static SEND_WAIT_THREAD_ID_MSG_ID: LazyMessageId = LazyMessageId::new("Winit::SendWaitThreadId\0");
-/// lparam points to a `Box<Instant>` signifying the time `PROCESS_NEW_EVENTS_MSG_ID` should
-/// be sent.
-static WAIT_UNTIL_MSG_ID: LazyMessageId = LazyMessageId::new("Winit::WaitUntil\0");
-static CANCEL_WAIT_UNTIL_MSG_ID: LazyMessageId = LazyMessageId::new("Winit::CancelWaitUntil\0");
 // Message sent by a `Window` when it wants to be destroyed by the main thread.
 // WPARAM and LPARAM are unused.
 pub static DESTROY_MSG_ID: LazyMessageId = LazyMessageId::new("Winit::DestroyMsg\0");
@@ -781,74 +798,6 @@ fn normalize_pointer_pressure(pressure: u32) -> Option<Force> {
     match pressure {
         1..=1024 => Some(Force::Normalized(pressure as f64 / 1024.0)),
         _ => None,
-    }
-}
-
-/// Flush redraw events for Winit's windows.
-///
-/// Winit's API guarantees that all redraw events will be clustered together and dispatched all at
-/// once, but the standard Windows message loop doesn't always exhibit that behavior. If multiple
-/// windows have had redraws scheduled, but an input event is pushed to the message queue between
-/// the `WM_PAINT` call for the first window and the `WM_PAINT` call for the second window, Windows
-/// will dispatch the input event immediately instead of flushing all the redraw events. This
-/// function explicitly pulls all of Winit's redraw events out of the event queue so that they
-/// always all get processed in one fell swoop.
-///
-/// Returns `true` if this invocation flushed all the redraw events. If this function is re-entrant,
-/// it won't flush the redraw events and will return `false`.
-#[must_use]
-unsafe fn flush_paint_messages<T: 'static>(
-    except: Option<HWND>,
-    runner: &EventLoopRunner<T>,
-) -> bool {
-    if !runner.redrawing() {
-        runner.main_events_cleared();
-        let mut msg = mem::zeroed();
-        runner.owned_windows(|redraw_window| {
-            if Some(redraw_window) == except {
-                return;
-            }
-
-            if PeekMessageW(
-                &mut msg,
-                redraw_window,
-                WM_PAINT,
-                WM_PAINT,
-                PM_REMOVE | PM_QS_PAINT,
-            ) == false.into()
-            {
-                return;
-            }
-
-            TranslateMessage(&msg);
-            DispatchMessageW(&msg);
-        });
-        true
-    } else {
-        false
-    }
-}
-
-unsafe fn process_control_flow<T: 'static>(runner: &EventLoopRunner<T>) {
-    match runner.control_flow() {
-        ControlFlow::Poll => {
-            PostMessageW(
-                runner.thread_msg_target(),
-                PROCESS_NEW_EVENTS_MSG_ID.get(),
-                0,
-                0,
-            );
-        }
-        ControlFlow::Wait => (),
-        ControlFlow::WaitUntil(until) => {
-            PostThreadMessageW(
-                runner.wait_thread_id(),
-                WAIT_UNTIL_MSG_ID.get(),
-                0,
-                Box::into_raw(WaitUntilInstantBox::new(until)) as isize,
-            );
-        }
-        ControlFlow::ExitWithCode(_) => (),
     }
 }
 
@@ -1014,13 +963,6 @@ unsafe fn public_window_callback_inner<T: 'static>(
     lparam: LPARAM,
     userdata: &WindowData<T>,
 ) -> LRESULT {
-    RedrawWindow(
-        userdata.event_loop_runner.thread_msg_target(),
-        ptr::null(),
-        0,
-        RDW_INTERNALPAINT,
-    );
-
     // I decided to bind the closure to `callback` and pass it to catch_unwind rather than passing
     // the closure to catch_unwind directly so that the match body indendation wouldn't change and
     // the git blame and history would be preserved.
@@ -1104,7 +1046,6 @@ unsafe fn public_window_callback_inner<T: 'static>(
                 window_id: RootWindowId(WindowId(window)),
                 event: Destroyed,
             });
-            userdata.event_loop_runner.remove_window(window);
             0
         }
 
@@ -1120,13 +1061,7 @@ unsafe fn public_window_callback_inner<T: 'static>(
                 // redraw the window outside the normal flow of the event loop.
                 RedrawWindow(window, ptr::null(), 0, RDW_INTERNALPAINT);
             } else {
-                let managing_redraw =
-                    flush_paint_messages(Some(window), &userdata.event_loop_runner);
                 userdata.send_event(Event::RedrawRequested(RootWindowId(WindowId(window))));
-                if managing_redraw {
-                    userdata.event_loop_runner.redraw_events_cleared();
-                    process_control_flow(&userdata.event_loop_runner);
-                }
             }
 
             DefWindowProcW(window, msg, wparam, lparam)
@@ -2352,27 +2287,8 @@ unsafe extern "system" fn thread_event_target_callback<T: 'static>(
             userdata_removed = true;
             0
         }
-        // Because WM_PAINT comes after all other messages, we use it during modal loops to detect
-        // when the event queue has been emptied. See `process_event` for more details.
         WM_PAINT => {
             ValidateRect(window, ptr::null());
-            // If the WM_PAINT handler in `public_window_callback` has already flushed the redraw
-            // events, `handling_events` will return false and we won't emit a second
-            // `RedrawEventsCleared` event.
-            if userdata.event_loop_runner.handling_events() {
-                if userdata.event_loop_runner.should_buffer() {
-                    // This branch can be triggered when a nested win32 event loop is triggered
-                    // inside of the `event_handler` callback.
-                    RedrawWindow(window, ptr::null(), 0, RDW_INTERNALPAINT);
-                } else {
-                    // This WM_PAINT handler will never be re-entrant because `flush_paint_messages`
-                    // doesn't call WM_PAINT for the thread event target (i.e. this window).
-                    assert!(flush_paint_messages(None, &userdata.event_loop_runner));
-                    userdata.event_loop_runner.redraw_events_cleared();
-                    process_control_flow(&userdata.event_loop_runner);
-                }
-            }
-
             // Default WM_PAINT behaviour. This makes sure modals and popups are shown immediatly when opening them.
             DefWindowProcW(window, msg, wparam, lparam)
         }
@@ -2505,40 +2421,6 @@ unsafe extern "system" fn thread_event_target_callback<T: 'static>(
         _ if msg == EXEC_MSG_ID.get() => {
             let mut function: ThreadExecFn = Box::from_raw(wparam as *mut _);
             function();
-            0
-        }
-        _ if msg == PROCESS_NEW_EVENTS_MSG_ID.get() => {
-            PostThreadMessageW(
-                userdata.event_loop_runner.wait_thread_id(),
-                CANCEL_WAIT_UNTIL_MSG_ID.get(),
-                0,
-                0,
-            );
-
-            // if the control_flow is WaitUntil, make sure the given moment has actually passed
-            // before emitting NewEvents
-            if let ControlFlow::WaitUntil(wait_until) = userdata.event_loop_runner.control_flow() {
-                let mut msg = mem::zeroed();
-                while Instant::now() < wait_until {
-                    if PeekMessageW(&mut msg, 0, 0, 0, PM_NOREMOVE) != false.into() {
-                        // This works around a "feature" in PeekMessageW. If the message PeekMessageW
-                        // gets is a WM_PAINT message that had RDW_INTERNALPAINT set (i.e. doesn't
-                        // have an update region), PeekMessageW will remove that window from the
-                        // redraw queue even though we told it not to remove messages from the
-                        // queue. We fix it by re-dispatching an internal paint message to that
-                        // window.
-                        if msg.message == WM_PAINT {
-                            let mut rect = mem::zeroed();
-                            if GetUpdateRect(msg.hwnd, &mut rect, false.into()) == false.into() {
-                                RedrawWindow(msg.hwnd, ptr::null(), 0, RDW_INTERNALPAINT);
-                            }
-                        }
-
-                        break;
-                    }
-                }
-            }
-            userdata.event_loop_runner.poll();
             0
         }
         _ => DefWindowProcW(window, msg, wparam, lparam),

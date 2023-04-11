@@ -15,6 +15,7 @@ use instant::{Duration, Instant};
 use once_cell::sync::OnceCell;
 use raw_window_handle::{HasRawDisplayHandle, RawDisplayHandle};
 
+use crate::error::ExternalError;
 use crate::{event::Event, monitor::MonitorHandle, platform_impl};
 
 /// Provides a way to retrieve events from the system and from the windows that were registered to
@@ -282,23 +283,36 @@ impl<T> EventLoop<T> {
         EventLoopBuilder::<T>::with_user_event().build()
     }
 
-    /// Hijacks the calling thread and initializes the winit event loop with the provided
-    /// closure. Since the closure is `'static`, it must be a `move` closure if it needs to
+    /// Runs the event loop in the calling thread and calls the given `event_handler` closure
+    /// to dispatch any window system events.
+    ///
+    /// Since the closure is `'static`, it must be a `move` closure if it needs to
     /// access any data from the calling context.
     ///
     /// See the [`ControlFlow`] docs for information on how changes to `&mut ControlFlow` impact the
     /// event loop's behavior.
     ///
-    /// Any values not passed to this function will *not* be dropped.
-    ///
     /// ## Platform-specific
     ///
     /// - **X11 / Wayland:** The program terminates with exit code 1 if the display server
     ///   disconnects.
+    /// - **iOS:** Will never return to the caller and so values not passed to this function will
+    ///   *not* be dropped before the process exits.
+    ///
+    ///   iOS applications are recommended to call `run_noreturn()` for added clarity that the
+    ///   function will never return.
+    /// - **Web:** Will _act_ as if it never returns to the caller by throwing a Javascript exception
+    ///   (that Rust doesn't see) that will also mean that any values not passed to this function
+    ///   will *not* be dropped.
+    ///
+    ///   Web applications are recommended to use `spawn()` instead of `run()` to avoid the need
+    ///   for the Javascript exception trick, and to make it clearer that the event loop runs
+    ///   asynchronously (via the browser's own, internal, event loop) and doesn't block the
+    ///   current thread of execution like it does on other platforms.
     ///
     /// [`ControlFlow`]: crate::event_loop::ControlFlow
     #[inline]
-    pub fn run<F>(self, event_handler: F) -> !
+    pub fn run<F>(self, event_handler: F) -> Result<(), ExternalError>
     where
         F: 'static + FnMut(Event<'_, T>, &EventLoopWindowTarget<T>, &mut ControlFlow),
     {

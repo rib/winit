@@ -6,7 +6,7 @@ use winit::{
     window::WindowBuilder,
 };
 
-pub fn main() {
+pub fn main() -> std::result::Result<(), impl std::error::Error> {
     let event_loop = EventLoop::new();
 
     let window = WindowBuilder::new()
@@ -33,7 +33,7 @@ pub fn main() {
             }
             _ => (),
         }
-    });
+    })
 }
 
 #[cfg(wasm_platform)]
