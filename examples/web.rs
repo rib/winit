@@ -7,7 +7,7 @@ use winit::{
     window::{Fullscreen, WindowBuilder},
 };
 
-pub fn main() {
+pub fn main() -> Result<(), impl std::error::Error> {
     let event_loop = EventLoop::new();
 
     let window = WindowBuilder::new()
@@ -53,7 +53,7 @@ pub fn main() {
             }
             _ => (),
         }
-    });
+    })
 }
 
 #[cfg(wasm_platform)]
@@ -66,7 +66,7 @@ mod wasm {
         console_log::init_with_level(log::Level::Debug).expect("error initializing logger");
 
         #[allow(clippy::main_recursion)]
-        super::main();
+        let _ = super::main();
     }
 
     pub fn insert_canvas_and_create_log_list(window: &Window) -> web_sys::Element {
