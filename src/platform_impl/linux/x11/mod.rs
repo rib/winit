@@ -45,10 +45,10 @@ use self::{
     util::modifiers::ModifierKeymap,
 };
 use crate::{
-    error::OsError as RootOsError,
-    event::{Event, StartCause},
+    error::{ExternalError, OsError as RootOsError},
+    event::{self, Event, PumpStatus, StartCause},
     event_loop::{
-        ControlFlow, DeviceEventFilter, EventLoopClosed, EventLoopWindowTarget as RootELW,
+        self, ControlFlow, DeviceEventFilter, EventLoopClosed, EventLoopWindowTarget as RootELW,
     },
     platform_impl::{
         platform::{sticky_exit_callback, WindowId},
@@ -56,6 +56,8 @@ use crate::{
     },
     window::WindowAttributes,
 };
+
+use super::min_timeout;
 
 const X_TOKEN: Token = Token(0);
 const USER_REDRAW_TOKEN: Token = Token(1);
@@ -113,7 +115,10 @@ pub struct EventLoopWindowTarget<T> {
 }
 
 pub struct EventLoop<T: 'static> {
+    loop_running: bool,
+    control_flow: ControlFlow,
     poll: Poll,
+    events: Events,
     waker: Arc<Waker>,
     event_processor: EventProcessor<T>,
     redraw_receiver: PeekableReceiver<WindowId>,
@@ -282,7 +287,10 @@ impl<T: 'static> EventLoop<T> {
         event_processor.init_device(ffi::XIAllDevices);
 
         EventLoop {
+            loop_running: false,
+            control_flow: ControlFlow::default(),
             poll,
+            events: Events::with_capacity(8),
             waker,
             event_processor,
             redraw_receiver: PeekableReceiver::from_recv(redraw_channel),
@@ -303,200 +311,229 @@ impl<T: 'static> EventLoop<T> {
         &self.target
     }
 
-    pub fn run_return<F>(&mut self, mut callback: F) -> i32
+    pub fn run_ondemand<F>(&mut self, mut event_handler: F) -> Result<(), ExternalError>
+    where
+        F: FnMut(event::Event<'_, T>, &event_loop::EventLoopWindowTarget<T>, &mut ControlFlow),
+    {
+        if self.loop_running {
+            return Err(ExternalError::AlreadyRunning);
+        }
+
+        loop {
+            if let PumpStatus::Exit(code) = self.pump_events_with_timeout(None, &mut event_handler)
+            {
+                if code == 0 {
+                    break Ok(());
+                } else {
+                    break Err(ExternalError::ExitFailure(code));
+                }
+            }
+        }
+    }
+
+    pub fn pump_events<F>(&mut self, event_handler: F) -> PumpStatus
+    where
+        F: FnMut(event::Event<'_, T>, &RootELW<T>, &mut ControlFlow),
+    {
+        self.pump_events_with_timeout(Some(Duration::ZERO), event_handler)
+    }
+
+    fn pump_events_with_timeout<F>(
+        &mut self,
+        timeout: Option<Duration>,
+        mut callback: F,
+    ) -> PumpStatus
+    where
+        F: FnMut(event::Event<'_, T>, &RootELW<T>, &mut ControlFlow),
+    {
+        if !self.loop_running {
+            self.loop_running = true;
+
+            // Reset the internal state for the loop as we start running to
+            // ensure consistent behaviour in case the loop runs and exits more
+            // than once
+            self.control_flow = ControlFlow::Poll;
+
+            // run the initial loop iteration
+            self.single_iteration(&mut callback, StartCause::Init);
+        }
+
+        self.poll_events_with_timeout(timeout, &mut callback);
+        if let ControlFlow::ExitWithCode(code) = self.control_flow {
+            self.loop_running = false;
+
+            let mut dummy = self.control_flow;
+            sticky_exit_callback(
+                event::Event::LoopDestroyed,
+                self.window_target(),
+                &mut dummy,
+                &mut callback,
+            );
+
+            PumpStatus::Exit(code)
+        } else {
+            PumpStatus::Continue
+        }
+    }
+
+    fn has_pending(&mut self) -> bool {
+        self.event_processor.poll()
+            || self.user_receiver.has_incoming()
+            || self.redraw_receiver.has_incoming()
+    }
+
+    fn poll_events_with_timeout<F>(&mut self, mut timeout: Option<Duration>, mut callback: F)
     where
         F: FnMut(Event<'_, T>, &RootELW<T>, &mut ControlFlow),
     {
-        struct IterationResult {
-            deadline: Option<Instant>,
-            timeout: Option<Duration>,
-            wait_start: Instant,
-        }
-        fn single_iteration<T, F>(
-            this: &mut EventLoop<T>,
-            control_flow: &mut ControlFlow,
-            cause: &mut StartCause,
-            callback: &mut F,
-        ) -> IterationResult
-        where
-            F: FnMut(Event<'_, T>, &RootELW<T>, &mut ControlFlow),
-        {
-            sticky_exit_callback(
-                crate::event::Event::NewEvents(*cause),
-                &this.target,
-                control_flow,
-                callback,
-            );
+        let start = Instant::now();
 
-            // NB: For consistency all platforms must emit a 'resumed' event even though X11
-            // applications don't themselves have a formal suspend/resume lifecycle.
-            if *cause == StartCause::Init {
-                sticky_exit_callback(
-                    crate::event::Event::Resumed,
-                    &this.target,
-                    control_flow,
-                    callback,
-                );
-            }
+        let has_pending = self.has_pending();
 
-            // Process all pending events
-            this.drain_events(callback, control_flow);
-
-            // Empty the user event buffer
-            {
-                while let Ok(event) = this.user_receiver.try_recv() {
-                    sticky_exit_callback(
-                        crate::event::Event::UserEvent(event),
-                        &this.target,
-                        control_flow,
-                        callback,
-                    );
-                }
-            }
-            // send MainEventsCleared
-            {
-                sticky_exit_callback(
-                    crate::event::Event::MainEventsCleared,
-                    &this.target,
-                    control_flow,
-                    callback,
-                );
-            }
-            // Empty the redraw requests
-            {
-                let mut windows = HashSet::new();
-
-                while let Ok(window_id) = this.redraw_receiver.try_recv() {
-                    windows.insert(window_id);
-                }
-
-                for window_id in windows {
-                    let window_id = crate::window::WindowId(window_id);
-                    sticky_exit_callback(
-                        Event::RedrawRequested(window_id),
-                        &this.target,
-                        control_flow,
-                        callback,
-                    );
-                }
-            }
-            // send RedrawEventsCleared
-            {
-                sticky_exit_callback(
-                    crate::event::Event::RedrawEventsCleared,
-                    &this.target,
-                    control_flow,
-                    callback,
-                );
-            }
-
-            let start = Instant::now();
-            let (deadline, timeout);
-
-            match control_flow {
-                ControlFlow::ExitWithCode(_) => {
-                    return IterationResult {
-                        wait_start: start,
-                        deadline: None,
-                        timeout: None,
-                    };
-                }
-                ControlFlow::Poll => {
-                    *cause = StartCause::Poll;
-                    deadline = None;
-                    timeout = Some(Duration::from_millis(0));
-                }
-                ControlFlow::Wait => {
-                    *cause = StartCause::WaitCancelled {
-                        start,
-                        requested_resume: None,
-                    };
-                    deadline = None;
-                    timeout = None;
-                }
+        timeout = if has_pending {
+            // If we already have work to do then we don't want to block on the next poll
+            Some(Duration::from_millis(0))
+        } else {
+            let control_flow_timeout = match self.control_flow {
+                ControlFlow::Wait => None,
+                ControlFlow::Poll => Some(Duration::from_millis(0)),
                 ControlFlow::WaitUntil(wait_deadline) => {
-                    *cause = StartCause::ResumeTimeReached {
-                        start,
-                        requested_resume: *wait_deadline,
-                    };
-                    timeout = if *wait_deadline > start {
-                        Some(*wait_deadline - start)
+                    if wait_deadline > start {
+                        Some(wait_deadline - start)
                     } else {
                         Some(Duration::from_millis(0))
-                    };
-                    deadline = Some(*wait_deadline);
-                }
-            }
-
-            IterationResult {
-                wait_start: start,
-                deadline,
-                timeout,
-            }
-        }
-
-        let mut control_flow = ControlFlow::default();
-        let mut events = Events::with_capacity(8);
-        let mut cause = StartCause::Init;
-
-        // run the initial loop iteration
-        let mut iter_result = single_iteration(self, &mut control_flow, &mut cause, &mut callback);
-
-        let exit_code = loop {
-            if let ControlFlow::ExitWithCode(code) = control_flow {
-                break code;
-            }
-            let has_pending = self.event_processor.poll()
-                || self.user_receiver.has_incoming()
-                || self.redraw_receiver.has_incoming();
-            if !has_pending {
-                // Wait until
-                if let Err(e) = self.poll.poll(&mut events, iter_result.timeout) {
-                    if e.raw_os_error() != Some(libc::EINTR) {
-                        panic!("epoll returned an error: {e:?}");
                     }
                 }
-                events.clear();
+                // `ExitWithCode()` will be reset to `Poll` before polling
+                ControlFlow::ExitWithCode(_code) => unreachable!(),
+            };
 
-                if control_flow == ControlFlow::Wait {
-                    // We don't go straight into executing the event loop iteration, we instead go
-                    // to the start of this loop and check again if there's any pending event. We
-                    // must do this because during the execution of the iteration we sometimes wake
-                    // the mio waker, and if the waker is already awaken before we call poll(),
-                    // then poll doesn't block, but it returns immediately. This caused the event
-                    // loop to run continuously even if the control_flow was `Wait`
-                    continue;
-                }
-            }
-
-            let wait_cancelled = iter_result
-                .deadline
-                .map_or(false, |deadline| Instant::now() < deadline);
-
-            if wait_cancelled {
-                cause = StartCause::WaitCancelled {
-                    start: iter_result.wait_start,
-                    requested_resume: iter_result.deadline,
-                };
-            }
-
-            iter_result = single_iteration(self, &mut control_flow, &mut cause, &mut callback);
+            min_timeout(control_flow_timeout, timeout)
         };
 
-        callback(
-            crate::event::Event::LoopDestroyed,
-            &self.target,
-            &mut control_flow,
-        );
-        exit_code
+        self.events.clear();
+        if let Err(e) = self.poll.poll(&mut self.events, timeout) {
+            if e.raw_os_error() != Some(libc::EINTR) {
+                panic!("epoll returned an error: {e:?}");
+            }
+        }
+        let readable = self.events.iter().any(|e| e.is_readable());
+
+        // False positive / spurious wake ups could lead to us spamming
+        // redundant iterations of the event loop with no new events to
+        // dispatch.
+        //
+        // If there's no readable event source then we just double check if we
+        // have any pending `_receiver` events and if not we return without
+        // running a loop iteration.
+        if !self.has_pending() && !readable {
+            return;
+        }
+
+        // NB: `StartCause::Init` is handled as a special case and doesn't need
+        // to be considered here
+        let cause = match self.control_flow {
+            ControlFlow::Poll => StartCause::Poll,
+            ControlFlow::Wait => StartCause::WaitCancelled {
+                start,
+                requested_resume: None,
+            },
+            ControlFlow::WaitUntil(deadline) => {
+                if Instant::now() < deadline {
+                    StartCause::WaitCancelled {
+                        start,
+                        requested_resume: Some(deadline),
+                    }
+                } else {
+                    StartCause::ResumeTimeReached {
+                        start,
+                        requested_resume: deadline,
+                    }
+                }
+            }
+            // `ExitWithCode()` will be reset to `Poll` before polling
+            ControlFlow::ExitWithCode(_code) => unreachable!(),
+        };
+
+        self.single_iteration(&mut callback, cause);
     }
 
-    pub fn run<F>(mut self, callback: F) -> !
+    fn single_iteration<F>(&mut self, callback: &mut F, cause: StartCause)
     where
-        F: 'static + FnMut(Event<'_, T>, &RootELW<T>, &mut ControlFlow),
+        F: FnMut(Event<'_, T>, &RootELW<T>, &mut ControlFlow),
     {
-        let exit_code = self.run_return(callback);
-        ::std::process::exit(exit_code);
+        let mut control_flow = self.control_flow;
+
+        sticky_exit_callback(
+            crate::event::Event::NewEvents(cause),
+            &self.target,
+            &mut control_flow,
+            callback,
+        );
+
+        // NB: For consistency all platforms must emit a 'resumed' event even though X11
+        // applications don't themselves have a formal suspend/resume lifecycle.
+        if cause == StartCause::Init {
+            sticky_exit_callback(
+                crate::event::Event::Resumed,
+                &self.target,
+                &mut control_flow,
+                callback,
+            );
+        }
+
+        // Process all pending events
+        self.drain_events(callback, &mut control_flow);
+
+        // Empty the user event buffer
+        {
+            while let Ok(event) = self.user_receiver.try_recv() {
+                sticky_exit_callback(
+                    crate::event::Event::UserEvent(event),
+                    &self.target,
+                    &mut control_flow,
+                    callback,
+                );
+            }
+        }
+        // send MainEventsCleared
+        {
+            sticky_exit_callback(
+                crate::event::Event::MainEventsCleared,
+                &self.target,
+                &mut control_flow,
+                callback,
+            );
+        }
+        // Empty the redraw requests
+        {
+            let mut windows = HashSet::new();
+
+            while let Ok(window_id) = self.redraw_receiver.try_recv() {
+                windows.insert(window_id);
+            }
+
+            for window_id in windows {
+                let window_id = crate::window::WindowId(window_id);
+                sticky_exit_callback(
+                    Event::RedrawRequested(window_id),
+                    &self.target,
+                    &mut control_flow,
+                    callback,
+                );
+            }
+        }
+        // send RedrawEventsCleared
+        {
+            sticky_exit_callback(
+                crate::event::Event::RedrawEventsCleared,
+                &self.target,
+                &mut control_flow,
+                callback,
+            );
+        }
+
+        self.control_flow = control_flow;
     }
 
     fn drain_events<F>(&mut self, callback: &mut F, control_flow: &mut ControlFlow)
