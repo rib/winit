@@ -15,6 +15,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use instant::Duration;
 #[cfg(x11_platform)]
 use once_cell::sync::Lazy;
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
@@ -28,7 +29,7 @@ use crate::platform::x11::XlibErrorHook;
 use crate::{
     dpi::{PhysicalPosition, PhysicalSize, Position, Size},
     error::{ExternalError, NotSupportedError, OsError as RootOsError},
-    event::Event,
+    event::{Event, PumpStatus},
     event_loop::{
         ControlFlow, DeviceEventFilter, EventLoopClosed, EventLoopWindowTarget as RootELW,
     },
@@ -778,18 +779,25 @@ impl<T: 'static> EventLoop<T> {
         x11_or_wayland!(match self; EventLoop(evlp) => evlp.create_proxy(); as EventLoopProxy)
     }
 
-    pub fn run_return<F>(&mut self, callback: F) -> i32
+    pub fn run<F>(mut self, callback: F) -> Result<(), ExternalError>
     where
         F: FnMut(crate::event::Event<'_, T>, &RootELW<T>, &mut ControlFlow),
     {
-        x11_or_wayland!(match self; EventLoop(evlp) => evlp.run_return(callback))
+        self.run_ondemand(callback)
     }
 
-    pub fn run<F>(self, callback: F) -> !
+    pub fn run_ondemand<F>(&mut self, callback: F) -> Result<(), ExternalError>
     where
-        F: 'static + FnMut(crate::event::Event<'_, T>, &RootELW<T>, &mut ControlFlow),
+        F: FnMut(crate::event::Event<'_, T>, &RootELW<T>, &mut ControlFlow),
     {
-        x11_or_wayland!(match self; EventLoop(evlp) => evlp.run(callback))
+        x11_or_wayland!(match self; EventLoop(evlp) => evlp.run_ondemand(callback))
+    }
+
+    pub fn pump_events<F>(&mut self, callback: F) -> PumpStatus
+    where
+        F: FnMut(crate::event::Event<'_, T>, &RootELW<T>, &mut ControlFlow),
+    {
+        x11_or_wayland!(match self; EventLoop(evlp) => evlp.pump_events(callback))
     }
 
     pub fn window_target(&self) -> &crate::event_loop::EventLoopWindowTarget<T> {
@@ -883,6 +891,15 @@ fn sticky_exit_callback<T, F>(
     } else {
         callback(evt, target, control_flow)
     }
+}
+
+/// Returns the minimum `Option<Duration>`, taking into account that `None`
+/// equates to an infinite timeout, not a zero timeout (so can't just use
+/// `Option::min`)
+fn min_timeout(a: Option<Duration>, b: Option<Duration>) -> Option<Duration> {
+    a.map_or(b, |a_timeout| {
+        b.map_or(Some(a_timeout), |b_timeout| Some(a_timeout.min(b_timeout)))
+    })
 }
 
 #[cfg(target_os = "linux")]
