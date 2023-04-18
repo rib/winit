@@ -54,7 +54,7 @@ use windows_sys::Win32::{
             GetMenu, GetMessageW, KillTimer, LoadCursorW, PeekMessageW, PostMessageW,
             RegisterClassExW, RegisterWindowMessageA, SetCursor, SetTimer, SetWindowPos,
             TranslateMessage, CREATESTRUCTW, GIDC_ARRIVAL, GIDC_REMOVAL, GWL_STYLE, GWL_USERDATA,
-            HTCAPTION, HTCLIENT, MINMAXINFO, MNC_CLOSE, NCCALCSIZE_PARAMS, PM_REMOVE, PT_PEN,
+            HTCAPTION, HTCLIENT, MINMAXINFO, MNC_CLOSE, MSG, NCCALCSIZE_PARAMS, PM_REMOVE, PT_PEN,
             PT_TOUCH, RI_KEY_E0, RI_KEY_E1, RI_MOUSE_WHEEL, SC_MINIMIZE, SC_RESTORE,
             SIZE_MAXIMIZED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WHEEL_DELTA,
             WINDOWPOS, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_CREATE, WM_DESTROY, WM_DPICHANGED,
@@ -254,6 +254,9 @@ impl<T: 'static> EventLoop<T> {
             }
 
             let event_loop_windows_ref = &self.window_target;
+            // # Safety
+            // We make sure to call runner.clear_event_handler() before
+            // returning
             unsafe {
                 runner.set_event_handler(move |event, control_flow| {
                     event_handler(event, event_loop_windows_ref, control_flow)
@@ -274,10 +277,11 @@ impl<T: 'static> EventLoop<T> {
         };
 
         let runner = &self.window_target.p.runner_shared;
-        unsafe {
-            runner.loop_destroyed();
-        }
+        runner.loop_destroyed();
 
+        // # Safety
+        // We assume that this will effectively call `runner.clear_event_handler()`
+        // to meet the safety requirements for calling `runner.set_event_handler()` above.
         runner.reset_runner();
 
         if exit_code == 0 {
@@ -294,6 +298,14 @@ impl<T: 'static> EventLoop<T> {
         {
             let runner = &self.window_target.p.runner_shared;
             let event_loop_windows_ref = &self.window_target;
+
+            // # Safety
+            // We make sure to call runner.clear_event_handler() before
+            // returning
+            //
+            // Note: we're currently assuming nothing can panic and unwind
+            // to leave the runner in an unsound state with an associated
+            // event handler.
             unsafe {
                 runner.set_event_handler(move |event, control_flow| {
                     event_handler(event, event_loop_windows_ref, control_flow)
@@ -302,40 +314,86 @@ impl<T: 'static> EventLoop<T> {
             }
         }
 
-        unsafe {
-            self.dispatch_peeked_messages();
-        };
+        self.dispatch_peeked_messages();
 
         let runner = &self.window_target.p.runner_shared;
 
         let status = if let ControlFlow::ExitWithCode(code) = runner.control_flow() {
-            unsafe {
-                runner.loop_destroyed();
+            runner.loop_destroyed();
 
-                // Immediately reset the internal state for the loop to allow
-                // the loop to be run more than once.
-                runner.reset_runner();
-            }
+            // Immediately reset the internal state for the loop to allow
+            // the loop to be run more than once.
+            runner.reset_runner();
             PumpStatus::Exit(code)
         } else {
-            unsafe {
-                runner.prepare_wait();
-            }
+            runner.prepare_wait();
             PumpStatus::Continue
         };
 
-        // Need to wait until we've checked for an exit status, in case we need to dispatch
-        // a LoopDestroyed event
+        // We wait until we've checked for an exit status before clearing the
+        // application callback, in case we need to dispatch a LoopDestroyed event
+        //
+        // # Safety
+        // This pairs up with our call to `runner.set_event_handler` and ensures
+        // the application's callback can't be held beyond its lifetime.
         runner.clear_event_handler();
 
         status
     }
 
     /// Wait for one message and dispatch it, optionally with a timeout if control_flow is `WaitUntil`
-    unsafe fn wait_and_dispatch_message(&mut self) -> ControlFlow {
-        let mut msg = mem::zeroed();
+    fn wait_and_dispatch_message(&mut self) -> ControlFlow {
+        let start = Instant::now();
 
         let runner = &self.window_target.p.runner_shared;
+
+        let timeout = match runner.control_flow() {
+            ControlFlow::Wait => None,
+            ControlFlow::Poll => Some(Duration::ZERO),
+            ControlFlow::WaitUntil(wait_deadline) => {
+                if wait_deadline > start {
+                    Some(wait_deadline - start)
+                } else {
+                    Some(Duration::ZERO)
+                }
+            }
+            ControlFlow::ExitWithCode(_code) => unreachable!(),
+        };
+
+        fn get_msg_with_timeout(msg: &mut MSG, timeout: Option<Duration>) -> PumpStatus {
+            unsafe {
+                // A timeout of None means wait indefinitely (so we don't need to call SetTimer)
+                let timer_id = timeout.map(|timeout| SetTimer(0, 0, dur2timeout(timeout), None));
+                let get_status = GetMessageW(msg, 0, 0, 0);
+                if let Some(timer_id) = timer_id {
+                    KillTimer(0, timer_id);
+                }
+                // A return value of 0 implies `WM_QUIT`
+                if get_status == 0 {
+                    PumpStatus::Exit(0)
+                } else {
+                    PumpStatus::Continue
+                }
+            }
+        }
+
+        /// Fetch the next MSG either via PeekMessage or GetMessage depending on whether the
+        /// requested timeout is `ZERO` (and so we don't want to block)
+        ///
+        /// Returns `None` if if no MSG was read, else a `Continue` or `Exit` status
+        fn wait_for_msg(msg: &mut MSG, timeout: Option<Duration>) -> Option<PumpStatus> {
+            if timeout == Some(Duration::ZERO) {
+                unsafe {
+                    if PeekMessageW(msg, 0, 0, 0, PM_REMOVE) != 0 {
+                        Some(PumpStatus::Continue)
+                    } else {
+                        None
+                    }
+                }
+            } else {
+                Some(get_msg_with_timeout(msg, timeout))
+            }
+        }
 
         // We aim to be consistent with the MacOS backend which has a RunLoop
         // observer that will dispatch MainEventsCleared when about to wait for
@@ -348,74 +406,81 @@ impl<T: 'static> EventLoop<T> {
         //
         runner.prepare_wait();
 
-        let start = Instant::now();
+        // # Safety
+        // The Windows API has no documented requirement for bitwise
+        // initializing a `MSG` struct (it can be uninitialized memory for the C
+        // API) and there's no API to construct or initialize a `MSG`. This
+        // is the simplest way avoid unitialized memory in Rust
+        let mut msg = unsafe { mem::zeroed() };
+        let msg_status = wait_for_msg(&mut msg, timeout);
 
-        let timeout = match runner.control_flow() {
-            ControlFlow::Wait => None,
-            ControlFlow::Poll => Some(Duration::from_millis(0)),
-            ControlFlow::WaitUntil(wait_deadline) => {
-                if wait_deadline > start {
-                    Some(wait_deadline - start)
-                } else {
-                    Some(Duration::from_millis(0))
-                }
-            }
-            ControlFlow::ExitWithCode(_code) => unreachable!(),
-        };
-        if let Some(timeout) = timeout {
-            // XXX: how should we pick a timer ID?
-            SetTimer(0, 0xf00, dur2timeout(timeout), None);
-        } else {
-            KillTimer(0, 0xf00);
-        }
-
-        if GetMessageW(&mut msg, 0, 0, 0) == false.into() {
-            // A return value of 0 implies `WM_QUIT`
-            runner.set_exit_control_flow();
-            return runner.control_flow();
-        }
-
+        // Before we potentially exit, make sure to consistently emit an event for the wake up
         runner.wakeup();
 
-        let handled = if let Some(callback) = self.msg_hook.as_deref_mut() {
-            callback(&mut msg as *mut _ as *mut _)
-        } else {
-            false
-        };
-        if !handled {
-            TranslateMessage(&msg);
-            DispatchMessageW(&msg);
-        }
+        match msg_status {
+            None => {} // No MSG to dispatch
+            Some(PumpStatus::Exit(code)) => {
+                runner.set_exit_control_flow(code);
+                return runner.control_flow();
+            }
+            Some(PumpStatus::Continue) => {
+                unsafe {
+                    let handled = if let Some(callback) = self.msg_hook.as_deref_mut() {
+                        callback(&mut msg as *mut _ as *mut _)
+                    } else {
+                        false
+                    };
+                    if !handled {
+                        TranslateMessage(&msg);
+                        DispatchMessageW(&msg);
+                    }
+                }
 
-        if let Err(payload) = runner.take_panic_error() {
-            runner.reset_runner();
-            panic::resume_unwind(payload);
+                if let Err(payload) = runner.take_panic_error() {
+                    runner.reset_runner();
+                    panic::resume_unwind(payload);
+                }
+            }
         }
 
         runner.control_flow()
     }
 
     /// Dispatch all queued messages via `PeekMessageW`
-    unsafe fn dispatch_peeked_messages(&mut self) -> ControlFlow {
+    fn dispatch_peeked_messages(&mut self) -> ControlFlow {
         let runner = &self.window_target.p.runner_shared;
 
-        let mut msg = mem::zeroed();
+        // We generally want to continue dispatching all pending messages
+        // but we also allow dispatching to be interrupted as a means to
+        // ensure the `pump_events` won't indefinitely block an external
+        // event loop if there are too many pending events. This interrupt
+        // flag will be set after dispatching `RedrawRequested` events.
+        runner.interrupt_msg_dispatch.set(false);
+
+        // # Safety
+        // The Windows API has no documented requirement for bitwise
+        // initializing a `MSG` struct (it can be uninitialized memory for the C
+        // API) and there's no API to construct or initialize a `MSG`. This
+        // is the simplest way avoid unitialized memory in Rust
+        let mut msg = unsafe { mem::zeroed() };
 
         let mut control_flow = runner.control_flow();
 
         loop {
-            if PeekMessageW(&mut msg, 0, 0, 0, PM_REMOVE) == false.into() {
-                break;
-            }
+            unsafe {
+                if PeekMessageW(&mut msg, 0, 0, 0, PM_REMOVE) == false.into() {
+                    break;
+                }
 
-            let handled = if let Some(callback) = self.msg_hook.as_deref_mut() {
-                callback(&mut msg as *mut _ as *mut _)
-            } else {
-                false
-            };
-            if !handled {
-                TranslateMessage(&msg);
-                DispatchMessageW(&msg);
+                let handled = if let Some(callback) = self.msg_hook.as_deref_mut() {
+                    callback(&mut msg as *mut _ as *mut _)
+                } else {
+                    false
+                };
+                if !handled {
+                    TranslateMessage(&msg);
+                    DispatchMessageW(&msg);
+                }
             }
 
             if let Err(payload) = runner.take_panic_error() {
@@ -425,6 +490,10 @@ impl<T: 'static> EventLoop<T> {
 
             control_flow = runner.control_flow();
             if let ControlFlow::ExitWithCode(_code) = control_flow {
+                break;
+            }
+
+            if runner.interrupt_msg_dispatch.get() {
                 break;
             }
         }

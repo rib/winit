@@ -196,6 +196,9 @@ fn ndk_keycode_to_virtualkeycode(keycode: Keycode) -> Option<event::VirtualKeyCo
     }
 }
 
+/// Returns the minimum `Option<Duration>`, taking into account that `None`
+/// equates to an infinite timeout, not a zero timeout (so can't just use
+/// `Option::min`)
 fn min_timeout(a: Option<Duration>, b: Option<Duration>) -> Option<Duration> {
     a.map_or(b, |a_timeout| {
         b.map_or(Some(a_timeout), |b_timeout| Some(a_timeout.min(b_timeout)))
