@@ -28,6 +28,11 @@ pub(crate) struct EventLoopRunner<T: 'static> {
     // The event loop's win32 handles
     pub(super) thread_msg_target: HWND,
 
+    // Setting this will ensure pump_events will return to the external
+    // loop asap. E.g. set after each RedrawRequested to ensure pump_events
+    // can't stall an external loop beyond a frame
+    pub(super) interrupt_msg_dispatch: Cell<bool>,
+
     control_flow: Cell<ControlFlow>,
     runner_state: Cell<RunnerState>,
     last_events_cleared: Cell<Instant>,
@@ -49,9 +54,6 @@ pub(crate) enum RunnerState {
     /// The event loop is handling the OS's events and sending them to the user's callback.
     /// `NewEvents` has been sent, and `MainEventsCleared` hasn't.
     HandlingMainEvents,
-    /// The event loop is handling the redraw events and sending them to the user's callback.
-    /// `MainEventsCleared` has been sent, and `RedrawEventsCleared` hasn't.
-    //HandlingRedrawEvents,
     /// The event loop has been destroyed. No other events will be emitted.
     Destroyed,
 }
@@ -65,6 +67,7 @@ impl<T> EventLoopRunner<T> {
     pub(crate) fn new(thread_msg_target: HWND) -> EventLoopRunner<T> {
         EventLoopRunner {
             thread_msg_target,
+            interrupt_msg_dispatch: Cell::new(false),
             runner_state: Cell::new(RunnerState::Uninitialized),
             control_flow: Cell::new(ControlFlow::Poll),
             panic_error: Cell::new(None),
@@ -74,6 +77,17 @@ impl<T> EventLoopRunner<T> {
         }
     }
 
+    /// Associate the application's event handler with the runner
+    ///
+    /// # Safety
+    /// This is ignoring the lifetime of the application handler (which may not
+    /// outlive the EventLoopRunner) and can lead to undefined behaviour if
+    /// the handler is not cleared before the end of real lifetime.
+    ///
+    /// All public APIs that take an event handler (`run`, `run_ondemand`,
+    /// `pump_events`) _must_ pair a call to `set_event_handler` with
+    /// a call to `clear_event_handler` before returning to avoid
+    /// undefined behaviour.
     pub(crate) unsafe fn set_event_handler<F>(&self, f: F)
     where
         F: FnMut(Event<'_, T>, &mut ControlFlow),
@@ -92,6 +106,7 @@ impl<T> EventLoopRunner<T> {
     pub(crate) fn reset_runner(&self) {
         let EventLoopRunner {
             thread_msg_target: _,
+            interrupt_msg_dispatch,
             runner_state,
             panic_error,
             control_flow,
@@ -99,6 +114,7 @@ impl<T> EventLoopRunner<T> {
             event_handler,
             event_buffer: _,
         } = self;
+        interrupt_msg_dispatch.set(false);
         runner_state.set(RunnerState::Uninitialized);
         panic_error.set(None);
         control_flow.set(ControlFlow::Poll);
@@ -108,6 +124,7 @@ impl<T> EventLoopRunner<T> {
 
 /// State retrieval functions.
 impl<T> EventLoopRunner<T> {
+    #[allow(unused)]
     pub fn thread_msg_target(&self) -> HWND {
         self.thread_msg_target
     }
@@ -123,8 +140,8 @@ impl<T> EventLoopRunner<T> {
         self.runner_state.get()
     }
 
-    pub fn set_exit_control_flow(&self) {
-        self.control_flow.set(ControlFlow::ExitWithCode(0))
+    pub fn set_exit_control_flow(&self, code: i32) {
+        self.control_flow.set(ControlFlow::ExitWithCode(code))
     }
 
     pub fn control_flow(&self) -> ControlFlow {
@@ -171,17 +188,21 @@ impl<T> EventLoopRunner<T> {
 
 /// Event dispatch functions.
 impl<T> EventLoopRunner<T> {
-    pub(crate) unsafe fn prepare_wait(&self) {
+    pub(crate) fn prepare_wait(&self) {
         self.move_state_to(RunnerState::Idle);
     }
 
-    pub(crate) unsafe fn wakeup(&self) {
+    pub(crate) fn wakeup(&self) {
         self.move_state_to(RunnerState::HandlingMainEvents);
     }
 
-    pub(crate) unsafe fn send_event(&self, event: Event<'_, T>) {
+    pub(crate) fn send_event(&self, event: Event<'_, T>) {
         if let Event::RedrawRequested(_) = event {
             self.call_event_handler(event);
+            // As a rule, to ensure that `pump_events` can't block an external event loop
+            // for too long, we always guarantee that `pump_events` will return control to
+            // the external loop asap after a `RedrawRequested` event is dispatched.
+            self.interrupt_msg_dispatch.set(true);
         } else if self.should_buffer() {
             // If the runner is already borrowed, we're in the middle of an event loop invocation. Add
             // the event to a buffer to be processed later.
@@ -194,11 +215,11 @@ impl<T> EventLoopRunner<T> {
         }
     }
 
-    pub(crate) unsafe fn loop_destroyed(&self) {
+    pub(crate) fn loop_destroyed(&self) {
         self.move_state_to(RunnerState::Destroyed);
     }
 
-    unsafe fn call_event_handler(&self, event: Event<'_, T>) {
+    fn call_event_handler(&self, event: Event<'_, T>) {
         self.catch_unwind(|| {
             let mut control_flow = self.control_flow.take();
             let mut event_handler = self.event_handler.take()
@@ -215,7 +236,7 @@ impl<T> EventLoopRunner<T> {
         });
     }
 
-    unsafe fn dispatch_buffered_events(&self) {
+    fn dispatch_buffered_events(&self) {
         loop {
             // We do this instead of using a `while let` loop because if we use a `while let`
             // loop the reference returned `borrow_mut()` doesn't get dropped until the end
@@ -252,7 +273,7 @@ impl<T> EventLoopRunner<T> {
     /// state is a no-op. Even if the `new_runner_state` isn't the immediate next state in the
     /// runner state machine (e.g. `self.runner_state == HandlingMainEvents` and
     /// `new_runner_state == Idle`), the intermediate state transitions will still be executed.
-    unsafe fn move_state_to(&self, new_runner_state: RunnerState) {
+    fn move_state_to(&self, new_runner_state: RunnerState) {
         use RunnerState::{Destroyed, HandlingMainEvents, Idle, Uninitialized};
 
         match (
@@ -303,7 +324,7 @@ impl<T> EventLoopRunner<T> {
         }
     }
 
-    unsafe fn call_new_events(&self, init: bool) {
+    fn call_new_events(&self, init: bool) {
         let start_cause = match (init, self.control_flow()) {
             (true, _) => StartCause::Init,
             (false, ControlFlow::Poll) => StartCause::Poll,
@@ -336,7 +357,7 @@ impl<T> EventLoopRunner<T> {
         self.dispatch_buffered_events();
     }
 
-    unsafe fn call_redraw_events_cleared(&self) {
+    fn call_redraw_events_cleared(&self) {
         self.call_event_handler(Event::RedrawEventsCleared);
         self.last_events_cleared.set(Instant::now());
     }
