@@ -23,7 +23,6 @@ use crate::{
     icon::Icon,
     platform::macos::{OptionAsAlt, WindowExtMacOS},
     platform_impl::platform::{
-        app_state::AppState,
         appkit::NSWindowOrderingMode,
         ffi,
         monitor::{self, MonitorHandle, VideoMode},
@@ -34,7 +33,7 @@ use crate::{
     },
     window::{
         CursorGrabMode, CursorIcon, ImePurpose, ResizeDirection, Theme, UserAttentionType,
-        WindowAttributes, WindowButtons, WindowId as RootWindowId, WindowLevel,
+        WindowAttributes, WindowButtons, WindowLevel,
     },
 };
 use core_graphics::display::{CGDisplay, CGPoint};
@@ -540,7 +539,8 @@ impl WinitWindow {
     }
 
     pub fn request_redraw(&self) {
-        AppState::queue_redraw(RootWindowId(self.id()));
+        let view = self.view();
+        view.request_redraw();
     }
 
     pub fn outer_position(&self) -> Result<PhysicalPosition<i32>, NotSupportedError> {

@@ -4,7 +4,7 @@ use std::{boxed::Box, os::raw::*, ptr, str, sync::Mutex};
 
 use objc2::declare::{Ivar, IvarDrop};
 use objc2::foundation::{
-    NSArray, NSAttributedString, NSAttributedStringKey, NSCopying,
+    is_main_thread, NSArray, NSAttributedString, NSAttributedStringKey, NSCopying,
     NSMutableAttributedString, NSObject, NSPoint, NSRange, NSRect, NSSize, NSString, NSUInteger,
 };
 use objc2::rc::{Id, Owned, Shared, WeakId};
@@ -882,6 +882,15 @@ impl WinitView {
 
     fn window_id(&self) -> WindowId {
         WindowId(self.window().id())
+    }
+
+    pub(super) fn request_redraw(&self) {
+        if is_main_thread() {
+            // Request a callback via `drawRect`
+            self.setNeedsDisplay(true);
+        } else {
+            AppState::queue_redraw_on_main(self.window_id());
+        }
     }
 
     fn queue_event(&self, event: WindowEvent<'static>) {
