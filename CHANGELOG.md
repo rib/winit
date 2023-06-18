@@ -9,6 +9,7 @@ And please only add new entries to the top of this list, right below the `# Unre
 # Unreleased
 
 - Implement `PartialOrd` and `Ord` for `KeyCode` and `NativeKeyCode`.
+- **Breaking** Removed `EventLoopExtRunReturn` (replaced by `EventLoopExtPumpEvents` and `EventLoopExtRunOnDemand`)
 
 # 0.29.0-beta.0
 
