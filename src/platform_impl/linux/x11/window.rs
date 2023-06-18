@@ -16,7 +16,7 @@ use crate::{
     dpi::{PhysicalPosition, PhysicalSize, Position, Size},
     error::{ExternalError, NotSupportedError, OsError as RootOsError},
     platform_impl::{
-        x11::{ime::ImeContextCreationError, MonitorHandle as X11MonitorHandle},
+        x11::{ime::ImeContextCreationError, MonitorHandle as X11MonitorHandle, WakeSender},
         Fullscreen, MonitorHandle as PlatformMonitorHandle, OsError,
         PlatformSpecificWindowBuilderAttributes, VideoMode as PlatformVideoMode,
     },
@@ -29,7 +29,6 @@ use crate::{
 use super::{
     ffi, util, EventLoopWindowTarget, ImeRequest, ImeSender, WindowId, XConnection, XError,
 };
-use calloop::channel::Sender;
 
 #[derive(Debug)]
 pub struct SharedState {
@@ -114,7 +113,7 @@ pub(crate) struct UnownedWindow {
     cursor_visible: Mutex<bool>,
     ime_sender: Mutex<ImeSender>,
     pub shared_state: Mutex<SharedState>,
-    redraw_sender: Sender<WindowId>,
+    redraw_sender: WakeSender<WindowId>,
 }
 
 impl UnownedWindow {
