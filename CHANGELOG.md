@@ -8,6 +8,11 @@ And please only add new entries to the top of this list, right below the `# Unre
 
 # Unreleased
 
+- **Breaking** `run() ->!` has been replaced by `run() -> Result<(), RunLoopError>` for returning errors without calling `std::process::exit()` ([#2767](https://github.com/rust-windowing/winit/pull/2767))
+- **Breaking** Removed `EventLoopExtRunReturn` / `run_return` in favor of `EventLoopExtPumpEvents` / `pump_events` and `EventLoopExtRunOnDemand` / `run_ondemand` ([#2767](https://github.com/rust-windowing/winit/pull/2767))
+- `RedrawRequested` is no longer guaranteed to be emitted after `MainEventsCleared`, it is now platform-specific when the event is emitted after being requested via `redraw_request()`.
+  - On Windows, `RedrawRequested` is now driven by `WM_PAINT` messages which are requested via `redraw_request()`
+- **Breaking:** Rename `Window::set_ime_position` to `Window::set_ime_cursor_area` adding a way to set exclusize zone.
 - On Web, allow event loops to be recreated with `spawn`.
 - **Breaking:** Rename `Window::set_ime_position` to `Window::set_ime_cursor_area` adding a way to set exclusive zone.
 - On Android, changed default behavior of Android to ignore volume keys letting the operating system handle them.
