@@ -9,7 +9,10 @@ And please only add new entries to the top of this list, right below the `# Unre
 # Unreleased
 
 - Implement `PartialOrd` and `Ord` for `KeyCode` and `NativeKeyCode`.
-- **Breaking** Removed `EventLoopExtRunReturn` (replaced by `EventLoopExtPumpEvents` and `EventLoopExtRunOnDemand`)
+- **Breaking** `run() ->!` has been replaced by `run() -> Result<(), RunLoopError>` for returning errors without calling `std::process::exit()` ([#2767](https://github.com/rust-windowing/winit/pull/2767))
+- **Breaking** Removed `EventLoopExtRunReturn` / `run_return` in favor of `EventLoopExtPumpEvents` / `pump_events` and `EventLoopExtRunOnDemand` / `run_ondemand` ([#2767](https://github.com/rust-windowing/winit/pull/2767))
+- `RedrawRequested` is no longer guaranteed to be emitted after `MainEventsCleared`, it is now platform-specific when the event is emitted after being requested via `redraw_request()`.
+  - On Windows, `RedrawRequested` is now driven by `WM_PAINT` messages which are requested via `redraw_request()`
 
 # 0.29.0-beta.0
 
