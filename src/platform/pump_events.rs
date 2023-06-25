@@ -1,7 +1,15 @@
 use crate::{
-    event::{Event, PumpStatus},
+    event::Event,
     event_loop::{ControlFlow, EventLoop, EventLoopWindowTarget},
 };
+
+/// The return status for `pump_events`
+pub enum PumpStatus {
+    /// Continue running external loop
+    Continue,
+    /// exit external loop
+    Exit(i32),
+}
 
 /// Additional methods on [`EventLoop`] for pumping events within an external event loop
 pub trait EventLoopExtPumpEvents {
