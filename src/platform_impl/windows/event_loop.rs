@@ -76,12 +76,10 @@ use windows_sys::Win32::{
 use crate::{
     dpi::{PhysicalPosition, PhysicalSize},
     error::RunLoopError,
-    event::{
-        DeviceEvent, Event, Force, Ime, PumpStatus, RawKeyEvent, Touch, TouchPhase, WindowEvent,
-    },
+    event::{DeviceEvent, Event, Force, Ime, RawKeyEvent, Touch, TouchPhase, WindowEvent},
     event_loop::{ControlFlow, DeviceEvents, EventLoopClosed, EventLoopWindowTarget as RootELW},
     keyboard::{KeyCode, ModifiersState},
-    platform::scancode::KeyCodeExtScancode,
+    platform::{pump_events::PumpStatus, scancode::KeyCodeExtScancode},
     platform_impl::platform::{
         dark_mode::try_theme,
         dpi::{become_dpi_aware, dpi_to_scale_factor},
