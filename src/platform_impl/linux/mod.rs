@@ -30,11 +30,14 @@ use crate::platform::x11::XlibErrorHook;
 use crate::{
     dpi::{PhysicalPosition, PhysicalSize, Position, Size},
     error::{ExternalError, NotSupportedError, OsError as RootOsError, RunLoopError},
-    event::{Event, KeyEvent, PumpStatus},
+    event::{Event, KeyEvent},
     event_loop::{ControlFlow, DeviceEvents, EventLoopClosed, EventLoopWindowTarget as RootELW},
     icon::Icon,
     keyboard::{Key, KeyCode},
-    platform::{modifier_supplement::KeyEventExtModifierSupplement, scancode::KeyCodeExtScancode},
+    platform::{
+        modifier_supplement::KeyEventExtModifierSupplement, pump_events::PumpStatus,
+        scancode::KeyCodeExtScancode,
+    },
     window::{
         CursorGrabMode, CursorIcon, ImePurpose, ResizeDirection, Theme, UserAttentionType,
         WindowAttributes, WindowButtons, WindowLevel,

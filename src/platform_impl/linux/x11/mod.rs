@@ -48,8 +48,9 @@ use self::{
 use super::common::xkb_state::KbdState;
 use crate::{
     error::{OsError as RootOsError, RunLoopError},
-    event::{Event, PumpStatus, StartCause},
+    event::{Event, StartCause},
     event_loop::{ControlFlow, DeviceEvents, EventLoopClosed, EventLoopWindowTarget as RootELW},
+    platform::pump_events::PumpStatus,
     platform_impl::{
         platform::{min_timeout, sticky_exit_callback, WindowId},
         PlatformSpecificWindowBuilderAttributes,
