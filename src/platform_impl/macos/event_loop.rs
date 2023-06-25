@@ -24,9 +24,9 @@ use raw_window_handle::{AppKitDisplayHandle, RawDisplayHandle};
 use super::appkit::{NSApp, NSApplicationActivationPolicy, NSEvent};
 use crate::{
     error::RunLoopError,
-    event::{Event, PumpStatus},
+    event::Event,
     event_loop::{ControlFlow, EventLoopClosed, EventLoopWindowTarget as RootWindowTarget},
-    platform::macos::ActivationPolicy,
+    platform::{macos::ActivationPolicy, pump_events::PumpStatus},
     platform_impl::platform::{
         app::WinitApplication,
         app_delegate::ApplicationDelegate,
