@@ -25,11 +25,12 @@ use crate::{
     event::{self, StartCause},
     event_loop::{self, ControlFlow, EventLoopWindowTarget as RootELW},
     keyboard::NativeKey,
+    platform::pump_events::PumpStatus,
     window::{
         self, CursorGrabMode, ImePurpose, ResizeDirection, Theme, WindowButtons, WindowLevel,
     },
 };
-use crate::{error::RunLoopError, event::PumpStatus, platform_impl::Fullscreen};
+use crate::{error::RunLoopError, platform_impl::Fullscreen};
 
 mod keycodes;
 
