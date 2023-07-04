@@ -45,7 +45,7 @@ use self::{
     event_processor::EventProcessor,
     ime::{Ime, ImeCreationError, ImeReceiver, ImeRequest, ImeSender},
 };
-use super::common::xkb_state::KbdState;
+use super::{common::xkb_state::KbdState, OsError};
 use crate::{
     error::{OsError as RootOsError, RunLoopError},
     event::{Event, StartCause},
@@ -403,7 +403,7 @@ impl<T: 'static> EventLoop<T> {
             return Err(RunLoopError::AlreadyRunning);
         }
 
-        loop {
+        let exit = loop {
             match self.pump_events_with_timeout(None, &mut event_handler) {
                 PumpStatus::Exit(0) => {
                     break Ok(());
@@ -413,7 +413,18 @@ impl<T: 'static> EventLoop<T> {
                 }
                 _ => {}
             }
-        }
+        };
+
+        // Applications aren't allowed to carry windows between separate
+        // `run_ondemand` calls but if they have only just dropped their
+        // windows we need to make sure those last requests are sent to the
+        // X Server.
+        let wt = get_xtarget(&self.target);
+        wt.x_connection()
+            .sync_with_server()
+            .map_err(|x_err| RunLoopError::Os(os_error!(OsError::XError(x_err))))?;
+
+        exit
     }
 
     pub fn pump_events<F>(&mut self, event_handler: F) -> PumpStatus
