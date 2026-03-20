@@ -17,7 +17,9 @@ use crate::dpi::{PhysicalPosition, PhysicalSize, Position, Size};
 use crate::error;
 use crate::error::EventLoopError;
 use crate::event::{self, Force, InnerSizeWriter, StartCause};
-use crate::event_loop::{self, ActiveEventLoop as RootAEL, ControlFlow, DeviceEvents};
+use crate::event_loop::{
+    self, ActiveEventLoop as RootAEL, ControlFlow, DeviceEvents, EventLoopBuilder,
+};
 use crate::platform::pump_events::PumpStatus;
 use crate::platform_impl::Fullscreen;
 use crate::window::{
@@ -289,7 +291,15 @@ impl<T: 'static> EventLoop<T> {
                 MainEvent::Destroy => {
                     // XXX: maybe exit mainloop to drop things before being
                     // killed by the OS?
-                    warn!("TODO: forward onDestroy notification to application");
+                    warn!("TODO: forward onDestroy notification to application - requesting to exit main loop");
+
+                    // We have no way to synchronously notify the application of
+                    // a destroy event but either way we _must_ exit the main
+                    // loop because after this event there is no longer an
+                    // Activity for us to interact with and AndroidApp
+                    // operations (including polling for events) will stop
+                    // working.
+                    self.window_target().exit();
                 },
                 MainEvent::InsetsChanged { .. } => {
                     // XXX: how to forward this state to applications?
@@ -627,6 +637,12 @@ impl<T: 'static> EventLoop<T> {
 
     fn exiting(&self) -> bool {
         self.window_target.p.exiting()
+    }
+}
+
+impl<T> Drop for EventLoop<T> {
+    fn drop(&mut self) {
+        EventLoopBuilder::<T>::allow_event_loop_recreation();
     }
 }
 
